@@ -1,0 +1,28 @@
+# Chat map: the allowlist of telegram chats tg-mcp logs and can reply to.
+#
+# Keys are telegram chat ids (negative for groups and supergroups). Every chat maps to a
+# customer slug — the only customer identifier the MCP tools expose. Chat ids never leave
+# the server.
+#
+# label is optional and only needed when one customer has several chats; then every chat of
+# that customer needs its own label, so tools can tell them apart. Labels must be unique
+# within a customer.
+#
+# To find a chat id: add the bot to the group and watch the log for the dropped-message line
+# naming the unknown chat id.
+#
+# Note: when a basic group is upgraded to a supergroup its chat id changes. tg-mcp logs the
+# migration with old and new id — update this file and restart.
+
+chats:
+  # single-group customer, no label needed
+  -1001234567890:
+    customer: acme
+
+  # multi-group customer, every chat labelled
+  -1009876543210:
+    customer: globex
+    label: main
+  -1005555555555:
+    customer: globex
+    label: escalations

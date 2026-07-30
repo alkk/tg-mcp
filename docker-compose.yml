@@ -1,0 +1,45 @@
+services:
+  tg-mcp:
+    build:
+      context: .
+      args:
+        REVISION: local
+    image: tg-mcp:latest
+    container_name: tg-mcp
+    hostname: tg-mcp
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      # both come from the environment or an .env file next to this compose file
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:?set TELEGRAM_TOKEN to the bot token}
+      - AUTH_TOKEN=${AUTH_TOKEN:?set AUTH_TOKEN to a long random string}
+      # cloud bot api; point at the self-hosted server instead to lift the 20 MB getFile limit
+      - TELEGRAM_API_URL=https://api.telegram.org
+      # set to true only when that server runs with --local (getFile returns filesystem paths
+      # instead of downloadable ones); then the volume below must be shared with it
+      # - TELEGRAM_LOCAL=true
+      # - DEBUG=true
+      - TZ=Europe/Riga
+    volumes:
+      - ./chats.yml:/srv/chats.yml:ro
+      - tg-mcp-data:/srv/data
+      # TELEGRAM_LOCAL mode only: the same volume the telegram-bot-api server writes files to,
+      # mounted at the exact path it reports in file_path
+      # - telegram-bot-api:/var/lib/telegram-bot-api:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  tg-mcp-data:
+  # telegram-bot-api:
+  #   external: true

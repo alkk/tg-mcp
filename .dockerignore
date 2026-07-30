@@ -1,0 +1,11 @@
+.git
+.bin
+.ralphex
+data
+docs
+chats.yml
+.env
+.env.*
+coverage*.out
+*.md
+!README.md

@@ -1,0 +1,8 @@
+.bin/
+/tg-mcp
+data/
+coverage.out
+coverage_no_mocks.out
+chats.yml
+.env
+.env.*
