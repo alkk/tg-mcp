@@ -23,7 +23,7 @@ import (
 //			GetFileFunc: func(ctx context.Context, fileID string) (telegram.File, error) {
 //				panic("mock out the GetFile method")
 //			},
-//			SendMessageFunc: func(ctx context.Context, chatID int64, text string, replyTo int64, threadID int64) (telegram.Message, error) {
+//			SendMessageFunc: func(ctx context.Context, chatID int64, text string, parseMode string, replyTo int64, threadID int64) (telegram.Message, error) {
 //				panic("mock out the SendMessage method")
 //			},
 //		}
@@ -40,7 +40,7 @@ type TelegramAPI struct {
 	GetFileFunc func(ctx context.Context, fileID string) (telegram.File, error)
 
 	// SendMessageFunc mocks the SendMessage method.
-	SendMessageFunc func(ctx context.Context, chatID int64, text string, replyTo int64, threadID int64) (telegram.Message, error)
+	SendMessageFunc func(ctx context.Context, chatID int64, text string, parseMode string, replyTo int64, threadID int64) (telegram.Message, error)
 
 	// calls tracks calls to the methods.
 	calls struct {
@@ -68,6 +68,8 @@ type TelegramAPI struct {
 			ChatID int64
 			// Text is the text argument value.
 			Text string
+			// ParseMode is the parseMode argument value.
+			ParseMode string
 			// ReplyTo is the replyTo argument value.
 			ReplyTo int64
 			// ThreadID is the threadID argument value.
@@ -156,27 +158,29 @@ func (mock *TelegramAPI) GetFileCalls() []struct {
 }
 
 // SendMessage calls SendMessageFunc.
-func (mock *TelegramAPI) SendMessage(ctx context.Context, chatID int64, text string, replyTo int64, threadID int64) (telegram.Message, error) {
+func (mock *TelegramAPI) SendMessage(ctx context.Context, chatID int64, text string, parseMode string, replyTo int64, threadID int64) (telegram.Message, error) {
 	if mock.SendMessageFunc == nil {
 		panic("TelegramAPI.SendMessageFunc: method is nil but telegramAPI.SendMessage was just called")
 	}
 	callInfo := struct {
-		Ctx      context.Context
-		ChatID   int64
-		Text     string
-		ReplyTo  int64
-		ThreadID int64
+		Ctx       context.Context
+		ChatID    int64
+		Text      string
+		ParseMode string
+		ReplyTo   int64
+		ThreadID  int64
 	}{
-		Ctx:      ctx,
-		ChatID:   chatID,
-		Text:     text,
-		ReplyTo:  replyTo,
-		ThreadID: threadID,
+		Ctx:       ctx,
+		ChatID:    chatID,
+		Text:      text,
+		ParseMode: parseMode,
+		ReplyTo:   replyTo,
+		ThreadID:  threadID,
 	}
 	mock.lockSendMessage.Lock()
 	mock.calls.SendMessage = append(mock.calls.SendMessage, callInfo)
 	mock.lockSendMessage.Unlock()
-	return mock.SendMessageFunc(ctx, chatID, text, replyTo, threadID)
+	return mock.SendMessageFunc(ctx, chatID, text, parseMode, replyTo, threadID)
 }
 
 // SendMessageCalls gets all the calls that were made to SendMessage.
@@ -184,18 +188,20 @@ func (mock *TelegramAPI) SendMessage(ctx context.Context, chatID int64, text str
 //
 //	len(mockedtelegramAPI.SendMessageCalls())
 func (mock *TelegramAPI) SendMessageCalls() []struct {
-	Ctx      context.Context
-	ChatID   int64
-	Text     string
-	ReplyTo  int64
-	ThreadID int64
+	Ctx       context.Context
+	ChatID    int64
+	Text      string
+	ParseMode string
+	ReplyTo   int64
+	ThreadID  int64
 } {
 	var calls []struct {
-		Ctx      context.Context
-		ChatID   int64
-		Text     string
-		ReplyTo  int64
-		ThreadID int64
+		Ctx       context.Context
+		ChatID    int64
+		Text      string
+		ParseMode string
+		ReplyTo   int64
+		ThreadID  int64
 	}
 	mock.lockSendMessage.RLock()
 	calls = mock.calls.SendMessage

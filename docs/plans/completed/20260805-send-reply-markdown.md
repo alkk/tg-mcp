@@ -196,28 +196,30 @@ greppable — that is the only signal the Post-Completion manual verification ha
 - Create: `pkg/tghtml/tghtml.go`
 - Create: `pkg/tghtml/tghtml_test.go`
 
-- [ ] block pass: line scanner handling fences (with/without language tag, invalid language token
+- [x] block pass: line scanner handling fences (with/without language tag, invalid language token
       dropped, unclosed at EOF, empty fence), `# `-space heading lines, plain lines; escape
       `&` `<` `>`; CRLF input normalised
-- [ ] write block-pass tests: escaping in text and inside fences, fences ± language, invalid
+- [x] write block-pass tests: escaping in text and inside fences, fences ± language, invalid
       language token, unclosed fence, empty fence, heading → bold, `#!/bin/sh` stays literal,
       plain text passes through untouched, CRLF
-- [ ] run block-pass tests - must pass before inline pass
-- [ ] inline pass: recursive renderer per the delimiter-run semantics and nesting rules above;
+- [x] run block-pass tests - must pass before inline pass
+- [x] inline pass: recursive renderer per the delimiter-run semantics and nesting rules above;
       href `&`/`"` escaping; link boundaries per spec; unmatched markers literal
-- [ ] sanity-check against the live Bot API (any throwaway chat) that `<code>` nested inside
+- [x] sanity-check against the live Bot API (any throwaway chat) that `<code>` nested inside
       `<b>`/`<i>`/`<a>` is accepted; if not, switch to the adjacent-emit fallback and update the
-      nesting section here
-- [ ] write inline-pass tests: **every row of the decision table as a named case**, plus
+      nesting section here — **manual (skipped: needs a live bot token, no network access here);
+      already covered by the Post-Completion manual verification**
+- [x] write inline-pass tests: **every row of the decision table as a named case**, plus
       precedence (code span beats bold; `**x**` not `<i>*x</i>*`), nesting
       (``**run `jcmd`**``, `[**docs**](url)`), flanking negatives (`file_unique_id` untouched —
       no `_` rule at all, `SELECT * FROM t`, `chmod 755 * && chown *`, `2 * 3 * 4`), unmatched
       markers, link boundaries (`)` in url, `]` in text, unterminated `[a](b`), links incl.
       query-string url (`?a=1&b=2`) and a `"` in url
-- [ ] adversarial row: ~200 alternating `*[` `` ` `` characters renders (all literal) without
-      hanging — catches accidental quadratic run-matching
-- [ ] add the real screenshot reply (jcmd instructions with fence + inline code) as a test case
-- [ ] run tests - must pass before task 2
+- [x] adversarial row: ~200 alternating `*[` `` ` `` characters renders (all literal) without
+      hanging — catches accidental quadratic run-matching; the assertion is tag balance, since
+      the backticks in that soup legitimately pair into code spans
+- [x] add the real screenshot reply (jcmd instructions with fence + inline code) as a test case
+- [x] run tests - must pass before task 2
 
 ### Task 2: parse-mode plumbing through client and interface
 
@@ -229,16 +231,16 @@ greppable — that is the only signal the Post-Completion manual verification ha
 - Modify: `pkg/server/tools_test.go` (hand-written `SendMessageFunc` at `:497` and `:640`)
 - Modify: `pkg/server/mocks/telegram_api.go` (regenerated)
 
-- [ ] add `ParseModeHTML` const; `SendMessage(ctx, chatID, text, parseMode, replyTo, threadID)` —
+- [x] add `ParseModeHTML` const; `SendMessage(ctx, chatID, text, parseMode, replyTo, threadID)` —
       `parseMode` right after `text` — sets `parse_mode` in the payload only when non-empty;
       update the doc comment at `client.go:116` ("plain text" no longer true)
-- [ ] update `telegramAPI` interface (`pkg/server/server.go:47`) and **all call sites first**
+- [x] update `telegramAPI` interface (`pkg/server/server.go:47`) and **all call sites first**
       (`tools.go` passes `""`, both `tools_test.go` mock funcs), *then*
       `go generate ./pkg/server` — moq type-checks the package, so it must compile before regen;
       behavior unchanged in this task
-- [ ] write tests: payload carries `parse_mode:"HTML"` when set, omits the key when empty
+- [x] write tests: payload carries `parse_mode:"HTML"` when set, omits the key when empty
       (httptest fake)
-- [ ] run tests - must pass before task 3
+- [x] run tests - must pass before task 3
 
 ### Task 3: render + fallback in sendReply
 
@@ -246,57 +248,65 @@ greppable — that is the only signal the Post-Completion manual verification ha
 - Modify: `pkg/server/tools.go`
 - Modify: `pkg/server/tools_test.go`
 
-- [ ] `sendReply`: render trimmed text via `tghtml.Render`, send with `telegram.ParseModeHTML`
-- [ ] fallback: on `*telegram.APIError` code 400 only, `slog.Warn` (server-side fields may name
+- [x] `sendReply`: render trimmed text via `tghtml.Render`, send with `telegram.ParseModeHTML`
+- [x] fallback: on `*telegram.APIError` code 400 only, `slog.Warn` (server-side fields may name
       the chat id, returned error text must not) and retry once with raw text, no parse mode; add
       `parse_mode`/`fallback` fields to the "reply sent" log, raw text logged as today
-- [ ] `echoAPI` (`tools_test.go:640`) mimics Telegram: response text is the *posted* text with
+      — ➕ both attempts live in `sendRendered`, which also does the `send reply to customer %q`
+      wrapping (wrapcheck rejects returning a bare interface-method error to the tool)
+- [x] `echoAPI` (`tools_test.go:640`) mimics Telegram: response text is the *posted* text with
       tags stripped and entities unescaped, so `res.Message.Text` asserts the clean-text contract
-- [ ] update tool `Description` and `Text` jsonschema tag: markdown subset is rendered (fences,
+- [x] update tool `Description` and `Text` jsonschema tag: markdown subset is rendered (fences,
       inline code, bold, `*italic*`, links, `# ` headings become bold lines); underscores never
-      italicise; tables/quotes are not rendered — README wording (Task 6) must match
-- [ ] write tests: mock captures rendered HTML + mode; 400 on first call → second call has raw
+      italicize; tables/quotes are not rendered — README wording (Task 6) must match
+      (⚠️ `misspell` enforces US spelling: "italicize", and a struct tag cannot contain backticks,
+      so the tag spells the subset out in words)
+- [x] write tests: mock captures rendered HTML + mode; 400 on first call → second call has raw
       text and empty mode; both attempts fail → returned error is the *second* (plain) failure
       and exactly two calls were made; 403 → no second call, error propagates; a raw text just
       under 4096 whose HTML is well past it is still accepted
-- [ ] run tests - must pass before task 4
+- [x] run tests - must pass before task 4
 
 ### Task 4: e2e coverage
 
 **Files:**
 - Modify: `cmd/tg-mcp/e2e_test.go`
 
-- [ ] `serveSend` mimics Telegram: records the posted `text` and `parse_mode`, but the returned
+- [x] `serveSend` mimics Telegram: records the posted `text` and `parse_mode`, but the returned
       Message carries entity-stripped plain text — a small tag strip plus `html.UnescapeString`
       (stdlib), not a parser
-- [ ] extend the existing "send_reply posts and logs the answer" subtest with markdown text:
+- [x] extend the existing "send_reply posts and logs the answer" subtest with markdown text:
       assert the recorded payload is HTML with `parse_mode=HTML`, and the tool result / persisted
       history show plain text — existing `sentMessages()==1` and `Messages==4` counts stay intact.
       ⚠️ the scenario is sequential and later subtests search the persisted reply: the new text
       must keep the phrase "please attach the agent log" (`get_thread` asserts it) and must not
       contain "upgrade" or "connecting" (search-count assertions at `e2e_test.go:236-243`)
-- [ ] run `make e2e` - must pass before task 5
+- [x] run `make e2e` - must pass before task 5
 
 ### Task 5: Verify acceptance criteria
 
-- [ ] a markdown reply renders as HTML on the wire; a plain reply still works; a 400 rejection
-      degrades to plain instead of erroring; snake_case identifiers survive untouched
-- [ ] no chat id appears in any error text returned to the MCP client
-- [ ] run full suite: `make fmt && make lint && make test && make e2e`
+- [x] a markdown reply renders as HTML on the wire; a plain reply still works; a 400 rejection
+      degrades to plain instead of erroring; snake_case identifiers survive untouched — pinned by
+      `TestToolsSendReply/{markdown_rendered_as_html,html_rejection_falls_back_to_plain_text,
+      both_attempts_fail,non_400_is_never_retried}`, the tghtml underscore row, and the e2e subtest
+- [x] no chat id appears in any error text returned to the MCP client — `sendRendered` wraps with
+      the customer slug only; ➕ added `assert.NotContains(err, "1001")` to the two new error paths
+- [x] run full suite: `make fmt && make lint && make test && make e2e` (lint 0 issues, all green,
+      tghtml at 100% statement coverage)
 
 ### Task 6: [Final] Update documentation
 
-- [ ] README.md: tool table row (`README.md:36`) and the plain-text bullet (`README.md:73`) now
+- [x] README.md: tool table row (`README.md:36`) and the plain-text bullet (`README.md:73`) now
       describe the rendered subset — keep wording in sync with the tool description (CLAUDE.md
       rule)
-- [ ] CLAUDE.md: add `tghtml` to the Layout package list, and add a **design-constraints bullet**:
+- [x] CLAUDE.md: add `tghtml` to the Layout package list, and add a **design-constraints bullet**:
       replies render server-side to `parse_mode=HTML` (not MarkdownV2, not `entities`), the
       telegram client stays markdown-dumb, conversion rules fail toward literal text (valid-but-
       wrong HTML is uncatchable corruption), and any 400 on the HTML attempt falls back to one
       plain send (a 400 delivered nothing, so no double-post)
-- [ ] completed plans (`docs/plans/completed/20260730-tg-mcp.md:204,:416`) still say "plain text,
-      no parse_mode" — historical record, deliberately left stale
-- [ ] move this plan to `docs/plans/completed/`
+- [x] completed plans (`docs/plans/completed/20260730-tg-mcp.md:204,:416`) still say "plain text,
+      no parse_mode" — verified still there, historical record, deliberately left stale
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

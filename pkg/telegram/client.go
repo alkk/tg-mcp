@@ -25,6 +25,9 @@ const (
 	cloudFileLimit  = 20 << 20 // getFile on the cloud api server refuses anything larger
 )
 
+// ParseModeHTML selects the telegram html subset for SendMessage.
+const ParseModeHTML = "HTML"
+
 // Client talks to a Bot API server, cloud or self-hosted.
 type Client struct {
 	token   string
@@ -113,10 +116,14 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64, timeout time.Dura
 	return res, nil
 }
 
-// SendMessage posts a plain text message and returns the message telegram created. Replies to
+// SendMessage posts a message and returns the message telegram created. parseMode selects how
+// text is parsed: empty for none, ParseModeHTML for the telegram html subset. Replies to
 // a message inherit its forum topic automatically; threadID targets a topic explicitly.
-func (c *Client) SendMessage(ctx context.Context, chatID int64, text string, replyTo, threadID int64) (Message, error) {
+func (c *Client) SendMessage(ctx context.Context, chatID int64, text, parseMode string, replyTo, threadID int64) (Message, error) {
 	payload := map[string]any{"chat_id": chatID, "text": text}
+	if parseMode != "" {
+		payload["parse_mode"] = parseMode
+	}
 	if replyTo > 0 {
 		payload["reply_parameters"] = map[string]any{"message_id": replyTo}
 	}

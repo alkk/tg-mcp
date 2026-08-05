@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	stdhtml "html"
+	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -490,12 +493,17 @@ func TestToolsSearchDefaultLimit(t *testing.T) {
 	assert.Equal(t, searchDefaultLimit, gotLimit)
 }
 
-// echoAPI answers sendMessage the way telegram does, assigning ids from 100 up.
+// echoAPI answers sendMessage the way telegram does, assigning ids from 100 up. The returned
+// message carries clean text: telegram answers with the parsed result, tags gone and entities
+// listed separately, never with the html it was handed.
 func echoAPI() *mocks.TelegramAPI {
 	var next int64 = 100
 	return &mocks.TelegramAPI{
-		SendMessageFunc: func(_ context.Context, chatID int64, text string, replyTo, threadID int64) (telegram.Message, error) {
+		SendMessageFunc: func(_ context.Context, chatID int64, text, parseMode string, replyTo, threadID int64) (telegram.Message, error) {
 			next++
+			if parseMode == telegram.ParseModeHTML {
+				text = plainOf(text)
+			}
 			m := telegram.Message{
 				MessageID: next, MessageThreadID: threadID, Chat: telegram.Chat{ID: chatID},
 				From: &telegram.User{ID: 42, IsBot: true, Username: "tg_mcp_bot", FirstName: "tg-mcp"},
@@ -507,6 +515,19 @@ func echoAPI() *mocks.TelegramAPI {
 			return m, nil
 		},
 	}
+}
+
+var htmlTag = regexp.MustCompile(`</?[a-zA-Z][^>]*>`)
+
+// plainOf is what telegram's html parser leaves of a message: tags stripped, entities unescaped.
+func plainOf(html string) string {
+	return stdhtml.UnescapeString(htmlTag.ReplaceAllString(html, ""))
+}
+
+// badRequest is the rejection telegram returns for html it cannot parse.
+func badRequest() *telegram.APIError {
+	return &telegram.APIError{Method: "sendMessage", Code: http.StatusBadRequest,
+		Description: "Bad Request: can't parse entities"}
 }
 
 func TestToolsSendReply(t *testing.T) {
@@ -635,9 +656,108 @@ func TestToolsSendReply(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	t.Run("markdown rendered as html", func(t *testing.T) {
+		tg := echoAPI()
+		s, _ := seededServerWith(t, tg)
+
+		_, res, err := s.sendReply(ctx, nil, sendReplyParams{Customer: "acme",
+			Text: "run **`jcmd`** & read <the> output"})
+		require.NoError(t, err)
+
+		calls := tg.SendMessageCalls()
+		require.Len(t, calls, 1)
+		assert.Equal(t, "run <b><code>jcmd</code></b> &amp; read &lt;the&gt; output", calls[0].Text)
+		assert.Equal(t, telegram.ParseModeHTML, calls[0].ParseMode)
+		assert.Equal(t, "run jcmd & read <the> output", res.Message.Text,
+			"the stored message is the text telegram rendered, not the markup")
+	})
+
+	t.Run("html rejection falls back to plain text", func(t *testing.T) {
+		tg := echoAPI()
+		send := tg.SendMessageFunc
+		tg.SendMessageFunc = func(callCtx context.Context, chatID int64, text, parseMode string,
+			replyTo, threadID int64) (telegram.Message, error) {
+			if parseMode != "" {
+				return telegram.Message{}, badRequest()
+			}
+			return send(callCtx, chatID, text, parseMode, replyTo, threadID)
+		}
+		s, _ := seededServerWith(t, tg)
+
+		_, res, err := s.sendReply(ctx, nil, sendReplyParams{Customer: "acme", Text: "see *the* log"})
+		require.NoError(t, err, "a 400 delivered nothing, the plain retry cannot double post")
+
+		calls := tg.SendMessageCalls()
+		require.Len(t, calls, 2)
+		assert.Equal(t, "see <i>the</i> log", calls[0].Text)
+		assert.Equal(t, "see *the* log", calls[1].Text, "the retry sends the markdown verbatim")
+		assert.Empty(t, calls[1].ParseMode)
+		assert.Equal(t, "see *the* log", res.Message.Text)
+		assert.Empty(t, res.Warning, "a rescued reply is a log line, not a client warning")
+	})
+
+	t.Run("both attempts fail", func(t *testing.T) {
+		plainErr := &telegram.APIError{Method: "sendMessage", Code: http.StatusBadRequest,
+			Description: "Bad Request: chat not found"}
+		tg := &mocks.TelegramAPI{
+			SendMessageFunc: func(_ context.Context, _ int64, _, parseMode string, _, _ int64) (telegram.Message, error) {
+				if parseMode != "" {
+					return telegram.Message{}, badRequest()
+				}
+				return telegram.Message{}, plainErr
+			},
+		}
+		s, _ := seededServerWith(t, tg)
+
+		_, _, err := s.sendReply(ctx, nil, sendReplyParams{Customer: "acme", Text: "*hi*"})
+		require.ErrorIs(t, err, plainErr, "the plain failure describes the send the caller asked for")
+		assert.Len(t, tg.SendMessageCalls(), 2, "exactly one retry, never more")
+		assert.NotContains(t, err.Error(), "1001", "chat ids never leave the server")
+	})
+
+	t.Run("non 400 is never retried", func(t *testing.T) {
+		tg := &mocks.TelegramAPI{
+			SendMessageFunc: func(context.Context, int64, string, string, int64, int64) (telegram.Message, error) {
+				return telegram.Message{}, &telegram.APIError{Method: "sendMessage", Code: 403,
+					Description: "Forbidden: bot was kicked from the group chat"}
+			},
+		}
+		s, _ := seededServerWith(t, tg)
+
+		_, _, err := s.sendReply(ctx, nil, sendReplyParams{Customer: "acme", Text: "*hi*"})
+		require.ErrorContains(t, err, "bot was kicked")
+		assert.Len(t, tg.SendMessageCalls(), 1, "the first attempt may have landed")
+		assert.NotContains(t, err.Error(), "1001", "chat ids never leave the server")
+	})
+
+	t.Run("a transport failure is never retried", func(t *testing.T) {
+		tg := &mocks.TelegramAPI{
+			SendMessageFunc: func(context.Context, int64, string, string, int64, int64) (telegram.Message, error) {
+				return telegram.Message{}, errors.New("dial tcp: i/o timeout")
+			},
+		}
+		s, _ := seededServerWith(t, tg)
+
+		_, _, err := s.sendReply(ctx, nil, sendReplyParams{Customer: "acme", Text: "*hi*"})
+		require.ErrorContains(t, err, "i/o timeout")
+		assert.Len(t, tg.SendMessageCalls(), 1, "only a 400 proves nothing was delivered")
+		assert.NotContains(t, err.Error(), "1001", "chat ids never leave the server")
+	})
+
+	t.Run("length is checked on the raw text, not the html", func(t *testing.T) {
+		tg := echoAPI()
+		s, _ := seededServerWith(t, tg)
+
+		// every character grows to &amp;, so the rendered message is five times the limit
+		_, _, err := s.sendReply(ctx, nil, sendReplyParams{Customer: "acme",
+			Text: strings.Repeat("&", maxReplyRunes)})
+		require.NoError(t, err)
+		assert.Equal(t, strings.Repeat("&amp;", maxReplyRunes), tg.SendMessageCalls()[0].Text)
+	})
+
 	t.Run("telegram error surfaced", func(t *testing.T) {
 		s, _ := seededServerWith(t, &mocks.TelegramAPI{
-			SendMessageFunc: func(context.Context, int64, string, int64, int64) (telegram.Message, error) {
+			SendMessageFunc: func(context.Context, int64, string, string, int64, int64) (telegram.Message, error) {
 				return telegram.Message{}, &telegram.APIError{Method: "sendMessage", Code: 429,
 					Description: "Too Many Requests: retry after 30", RetryAfter: 30}
 			},

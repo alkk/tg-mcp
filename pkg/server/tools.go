@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/alkk/tg-mcp/pkg/config"
 	"github.com/alkk/tg-mcp/pkg/store"
 	"github.com/alkk/tg-mcp/pkg/telegram"
+	"github.com/alkk/tg-mcp/pkg/tghtml"
 )
 
 const (
@@ -110,7 +112,7 @@ type searchParams struct {
 
 type sendReplyParams struct {
 	Customer string `json:"customer" jsonschema:"customer slug"`
-	Text     string `json:"text" jsonschema:"plain text of the reply, no markdown, at most 4096 characters"`
+	Text     string `json:"text" jsonschema:"text of the reply, at most 4096 characters; a markdown subset is rendered - fenced and inline code, **bold**, *italic*, links whose target carries a scheme such as https, and '# ' headings as bold lines; underscores never italicize, tables and block quotes are not rendered"`
 	ReplyTo  int64  `json:"reply_to,omitempty" jsonschema:"telegram message id to answer; the reply inherits its forum topic"`
 	Label    string `json:"label,omitempty" jsonschema:"group label, needed when the customer has several groups and reply_to does not pin one"`
 }
@@ -182,8 +184,11 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name: "send_reply",
-		Description: "Post a plain text message into a customer group as the bot. Answering a " +
-			"message keeps the conversation together and lands in its forum topic.",
+		Description: "Post a message into a customer group as the bot. A markdown subset is " +
+			"rendered: fenced and inline code, **bold**, *italic*, links whose target carries a " +
+			"scheme such as https, and '# ' headings as bold lines; underscores never italicize, " +
+			"tables and block quotes are not rendered. Answering a message keeps the " +
+			"conversation together and lands in its forum topic.",
 	}, s.sendReply)
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -214,12 +219,17 @@ func (s *Server) sendReply(ctx context.Context, _ *mcp.CallToolRequest,
 		return nil, sendReplyResult{}, err
 	}
 
-	sent, err := s.telegram.SendMessage(ctx, chat.ID, text, in.ReplyTo, target.ThreadID)
+	sent, fallback, err := s.sendRendered(ctx, chat, text, in.ReplyTo, target.ThreadID)
 	if err != nil {
-		return nil, sendReplyResult{}, fmt.Errorf("send reply to customer %q: %w", chat.Customer, err)
+		return nil, sendReplyResult{}, err
+	}
+	parseMode := telegram.ParseModeHTML
+	if fallback {
+		parseMode = ""
 	}
 	slog.Info("reply sent", "customer", chat.Customer, "label", chat.Label, "chat_id", chat.ID,
-		"message_id", sent.MessageID, "reply_to", in.ReplyTo, "thread_id", target.ThreadID, "text", text)
+		"message_id", sent.MessageID, "reply_to", in.ReplyTo, "thread_id", target.ThreadID,
+		"parse_mode", parseMode, "fallback", fallback, "text", text)
 
 	// the message is out; logging it must not ride on the caller's context. A client that hung up
 	// between delivery and this write would leave the thread without its answer for good, and
@@ -235,6 +245,30 @@ func (s *Server) sendReply(ctx context.Context, _ *mcp.CallToolRequest,
 	}
 	res.Message = view(msg, s.chatNamer())
 	return nil, res, nil
+}
+
+// sendRendered posts the reply as telegram html and reports whether it had to degrade to the raw
+// markdown. Only a 400 is retried: it means telegram delivered nothing, so the second attempt
+// cannot double post, while a 403 or a timeout may well have landed.
+func (s *Server) sendRendered(ctx context.Context, chat config.Chat, text string,
+	replyTo, threadID int64) (msg telegram.Message, fallback bool, err error) {
+	sent, err := s.telegram.SendMessage(ctx, chat.ID, tghtml.Render(text), telegram.ParseModeHTML,
+		replyTo, threadID)
+	if err == nil {
+		return sent, false, nil
+	}
+	var apiErr *telegram.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != http.StatusBadRequest {
+		return telegram.Message{}, false, fmt.Errorf("send reply to customer %q: %w", chat.Customer, err)
+	}
+
+	slog.Warn("html reply rejected, retrying as plain text", "err", err, "customer", chat.Customer,
+		"label", chat.Label, "chat_id", chat.ID)
+	sent, err = s.telegram.SendMessage(ctx, chat.ID, text, "", replyTo, threadID)
+	if err != nil {
+		return telegram.Message{}, true, fmt.Errorf("send reply to customer %q: %w", chat.Customer, err)
+	}
+	return sent, true, nil
 }
 
 // replyTarget resolves the group a reply goes to and the message it answers. A reply_to pins the

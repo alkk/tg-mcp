@@ -7,9 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	stdhtml "html"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -192,18 +194,23 @@ func TestE2ESmoke(t *testing.T) {
 	var reply e2eSendReply
 	t.Run("send_reply posts and logs the answer", func(t *testing.T) {
 		callTool(ctx, t, session, "send_reply", map[string]any{
-			"customer": "acme", "text": "looking into it, please attach the agent log", "reply_to": 101,
+			"customer": "acme", "reply_to": 101,
+			"text": "looking into it: run **`nxagentd -D6`** & please attach the agent log",
 		}, &reply)
 		assert.Empty(t, reply.Warning)
 		assert.True(t, reply.Message.FromBot)
 		assert.Equal(t, int64(101), reply.Message.ReplyTo)
+		assert.Equal(t, "looking into it: run nxagentd -D6 & please attach the agent log",
+			reply.Message.Text, "the client sees the text telegram rendered, not the markup")
 
 		sent := api.sentMessages()
 		require.Len(t, sent, 1)
 		chatID, ok := sent[0]["chat_id"].(float64)
 		require.True(t, ok, "chat_id missing from the sendMessage payload: %+v", sent[0])
 		assert.Equal(t, int64(e2eChatID), int64(chatID))
-		assert.Equal(t, "looking into it, please attach the agent log", sent[0]["text"])
+		assert.Equal(t, "HTML", sent[0]["parse_mode"])
+		assert.Equal(t, "looking into it: run <b><code>nxagentd -D6</code></b> &amp; "+
+			"please attach the agent log", sent[0]["text"])
 	})
 
 	t.Run("the sent reply shows up in the thread", func(t *testing.T) {
@@ -453,17 +460,28 @@ func (a *fakeAPI) serveSend(w http.ResponseWriter, r *http.Request) {
 	a.sent = append(a.sent, req)
 	a.mu.Unlock()
 
+	text, _ := req["text"].(string)
+	if req["parse_mode"] == "HTML" { // telegram answers with the parsed message, never with the markup
+		text = e2ePlainOf(text)
+	}
 	result := map[string]any{
 		"message_id": id,
 		"from":       map[string]any{"id": e2eBotID, "is_bot": true, "username": e2eBotName},
 		"chat":       map[string]any{"id": e2eChatID, "type": "supergroup", "title": "Acme Support"},
 		"date":       time.Now().Unix(),
-		"text":       req["text"],
+		"text":       text,
 	}
 	if params, ok := req["reply_parameters"].(map[string]any); ok {
 		result["reply_to_message"] = map[string]any{"message_id": params["message_id"]}
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": result})
+}
+
+var e2eHTMLTag = regexp.MustCompile(`</?[a-zA-Z][^>]*>`)
+
+// e2ePlainOf is what telegram's html parser leaves of a message: tags stripped, entities unescaped.
+func e2ePlainOf(text string) string {
+	return stdhtml.UnescapeString(e2eHTMLTag.ReplaceAllString(text, ""))
 }
 
 // scriptedBatch is what the fake api delivers on the first poll: three messages worth keeping,

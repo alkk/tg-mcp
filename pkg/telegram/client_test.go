@@ -149,7 +149,7 @@ func TestClientSendMessage(t *testing.T) {
 				"chat":{"id":-1001,"type":"supergroup"},"from":{"id":1,"is_bot":true,"username":"tgbot"}}`)
 		})
 
-		msg, err := c.SendMessage(context.Background(), -1001, "on it", 12, 3)
+		msg, err := c.SendMessage(context.Background(), -1001, "on it", "", 12, 3)
 		require.NoError(t, err)
 		assert.Equal(t, int64(99), msg.MessageID)
 		assert.True(t, msg.From.IsBot)
@@ -167,10 +167,26 @@ func TestClientSendMessage(t *testing.T) {
 			writeOK(t, w, `{"message_id":100,"date":1700000000,"chat":{"id":-1001,"type":"supergroup"}}`)
 		})
 
-		_, err := c.SendMessage(context.Background(), -1001, "hi", 0, 0)
+		_, err := c.SendMessage(context.Background(), -1001, "hi", "", 0, 0)
 		require.NoError(t, err)
 		assert.NotContains(t, seen, "reply_parameters")
 		assert.NotContains(t, seen, "message_thread_id")
+		assert.NotContains(t, seen, "parse_mode", "an empty parse mode leaves the key out entirely")
+	})
+
+	t.Run("html parse mode", func(t *testing.T) {
+		var seen map[string]any
+		c := newTestClient(t, false, func(w http.ResponseWriter, r *http.Request) {
+			seen = decodePayload(t, r)
+			writeOK(t, w, `{"message_id":101,"date":1700000000,"text":"run jcmd",
+				"chat":{"id":-1001,"type":"supergroup"}}`)
+		})
+
+		msg, err := c.SendMessage(context.Background(), -1001, "run <code>jcmd</code>", ParseModeHTML, 0, 0)
+		require.NoError(t, err)
+		assert.Equal(t, int64(101), msg.MessageID)
+		assert.Equal(t, "HTML", seen["parse_mode"])
+		assert.Equal(t, "run <code>jcmd</code>", seen["text"])
 	})
 
 	t.Run("429 retried once", func(t *testing.T) {
@@ -184,7 +200,7 @@ func TestClientSendMessage(t *testing.T) {
 			writeOK(t, w, `{"message_id":99,"date":1700000000,"chat":{"id":-1001,"type":"supergroup"}}`)
 		})
 
-		msg, err := c.SendMessage(context.Background(), -1001, "hi", 0, 0)
+		msg, err := c.SendMessage(context.Background(), -1001, "hi", "", 0, 0)
 		require.NoError(t, err)
 		assert.Equal(t, int64(99), msg.MessageID)
 		assert.Equal(t, int32(2), calls.Load())
@@ -198,7 +214,7 @@ func TestClientSendMessage(t *testing.T) {
 				`{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":1}}`)
 		})
 
-		_, err := c.SendMessage(context.Background(), -1001, "hi", 0, 0)
+		_, err := c.SendMessage(context.Background(), -1001, "hi", "", 0, 0)
 		require.Error(t, err)
 
 		var apiErr *APIError
@@ -215,7 +231,7 @@ func TestClientSendMessage(t *testing.T) {
 				"parameters":{"migrate_to_chat_id":-1009}}`)
 		})
 
-		_, err := c.SendMessage(context.Background(), -100, "hi", 0, 0)
+		_, err := c.SendMessage(context.Background(), -100, "hi", "", 0, 0)
 		var apiErr *APIError
 		require.ErrorAs(t, err, &apiErr)
 		assert.Equal(t, int64(-1009), apiErr.MigrateToChatID)
@@ -227,7 +243,7 @@ func TestClientSendMessage(t *testing.T) {
 			assert.NoError(t, err)
 		})
 
-		_, err := c.SendMessage(context.Background(), -1001, "hi", 0, 0)
+		_, err := c.SendMessage(context.Background(), -1001, "hi", "", 0, 0)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "decode sendMessage response")
 	})
@@ -237,7 +253,7 @@ func TestClientSendMessage(t *testing.T) {
 			writeOK(t, w, `"a string, not a message"`)
 		})
 
-		_, err := c.SendMessage(context.Background(), -1001, "hi", 0, 0)
+		_, err := c.SendMessage(context.Background(), -1001, "hi", "", 0, 0)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "decode sendMessage result")
 	})
@@ -247,7 +263,7 @@ func TestClientSendMessage(t *testing.T) {
 			writeErr(t, w, http.StatusBadGateway, `{"ok":false,"description":"upstream down"}`)
 		})
 
-		_, err := c.SendMessage(context.Background(), -1001, "hi", 0, 0)
+		_, err := c.SendMessage(context.Background(), -1001, "hi", "", 0, 0)
 		var apiErr *APIError
 		require.ErrorAs(t, err, &apiErr)
 		assert.Equal(t, http.StatusBadGateway, apiErr.Code)
@@ -458,7 +474,7 @@ func TestClientRetryWaitCanceled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err := c.SendMessage(ctx, -1001, "hi", 0, 0)
+	_, err := c.SendMessage(ctx, -1001, "hi", "", 0, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "retry_after")
 }

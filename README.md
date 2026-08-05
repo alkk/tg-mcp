@@ -33,7 +33,7 @@ deletions are never delivered, and the cloud API caps `getFile` at 20 MB — a s
 | `get_history` | `customer, from?, to?, limit?, label?, cursor?` | chronological bulk, defaults to the last 24h (limit 200) |
 | `search` | `query, customer?, from?, to?, limit?` | FTS5 hits with snippets (limit 50) |
 | `get_file` | `customer, message_id, label?` | image/text inline, larger files as a download URL |
-| `send_reply` | `customer, text, reply_to?, label?` | sends as the bot and logs the sent message |
+| `send_reply` | `customer, text, reply_to?, label?` | renders a markdown subset, sends as the bot and logs the sent message |
 | `mark_handled` | `customer, message_id, label?` | advances the triage cursor |
 
 Every tool that addresses a message takes an optional `label`; when a customer has several
@@ -70,11 +70,25 @@ groups and nothing else pins one down, the error lists the available labels.
 - **`get_file`** returns images and text inline under 1 MiB; anything larger or binary comes back
   as a `/files/<id>` url plus metadata. Files are downloaded from Telegram on first request and
   cached on disk afterwards.
-- **`send_reply`** sends plain text only (no markdown parsing) and rejects anything over 4096
-  characters instead of silently splitting it. It inherits the forum topic of `reply_to`, and a
-  `reply_to` that exists in exactly one of a customer's groups pins the group by itself. The sent
-  message is written to the log immediately — if delivery succeeded but logging failed you get
-  the reply plus a `warning` rather than an error, because an error would invite a double post.
+- **`send_reply`** renders a markdown subset to Telegram HTML before sending: fenced and inline
+  code, `**bold**`, `*italic*`, `[links](url)` whose target carries an `https://`, `http://`,
+  `tg://`, `mailto:` or `tel:` scheme, and `# ` headings as bold lines. Underscores never
+  italicize — `file_unique_id` stays as typed — a single `*` only italicizes when a word character
+  sits on both sides of the pair, so `rm /tmp/*.log /var/*.log` and `f(*args)` survive intact.
+  `**` and `***` do not open behind punctuation glued to a word either, so `f(**kwargs) and
+  g(**args)` keeps its stars while `see (**bold**)` still emphasizes. Tables and block quotes are
+  not rendered. Link text may be bold or italic but keeps the backticks of a code span: Telegram
+  refuses to nest a code entity in a link and drops one of the two, which can take the url with it.
+  Anything the converter cannot match confidently
+  stays literal, and if Telegram cannot parse the formatting the message is resent once as plain
+  text; that rescue is a log line, not a `warning`. Any other failure — and a failing plain retry
+  — comes back as an error. The 4096-character limit applies to the text as written and is
+  rejected instead of silently split. It inherits the forum topic of `reply_to`, and a `reply_to`
+  that exists in exactly one of a customer's groups pins the group by itself. The sent message is
+  written to the log immediately — if delivery succeeded but logging failed you get the reply plus
+  a `warning` rather than an error, because an error would invite a double post. What is logged is
+  the message Telegram built, so searches over the bot's own replies match the words, not the `**`
+  and the backticks.
 - **mentions** are flagged both for an `@bot` mention (in text or media caption) and for a reply
   to one of the bot's own messages.
 

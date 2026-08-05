@@ -44,7 +44,7 @@ type messageStore interface {
 
 // telegramAPI is the slice of the bot api the action tools need.
 type telegramAPI interface {
-	SendMessage(ctx context.Context, chatID int64, text string, replyTo, threadID int64) (telegram.Message, error)
+	SendMessage(ctx context.Context, chatID int64, text, parseMode string, replyTo, threadID int64) (telegram.Message, error)
 	GetFile(ctx context.Context, fileID string) (telegram.File, error)
 	Download(ctx context.Context, filePath string, dst io.Writer) error
 }
