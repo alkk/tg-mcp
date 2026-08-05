@@ -134,7 +134,8 @@ func TestToolsGetFile(t *testing.T) {
 		res, out, err := s.getFile(ctx, nil, getFileParams{Customer: "acme", MessageID: 2})
 		require.NoError(t, err)
 		assert.True(t, out.Inline)
-		assert.Equal(t, "text/plain", out.MimeType)
+		assert.True(t, strings.HasPrefix(out.MimeType, "text/"),
+			"system mime tables map .log differently across platforms, got %q", out.MimeType)
 
 		require.NotNil(t, res)
 		require.Len(t, res.Content, 1)
