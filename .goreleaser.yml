@@ -1,0 +1,20 @@
+version: 2
+
+builds:
+  - main: ./cmd/tg-mcp
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags: "-s -w -X main.revision={{.Tag}}-{{.ShortCommit}}-{{.CommitDate}}"
+
+archives:
+  - name_template: "{{ .ProjectName }}_{{ .Tag }}_{{ if eq .Os \"darwin\" }}macos{{ else }}{{ .Os }}{{ end }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - chats.example.yml

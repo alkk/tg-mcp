@@ -1,5 +1,7 @@
 # tg-mcp
 
+[![build](https://github.com/alkk/tg-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/alkk/tg-mcp/actions/workflows/ci.yml)
+
 Telegram support gateway. A Bot API bot silently logs allowlisted customer groups into SQLite,
 and an MCP server (streamable HTTP, bearer auth) lets Claude Code / Claude Desktop triage that
 history — read new messages, reconstruct threads, search, fetch attachments, and reply as the bot.
@@ -123,6 +125,9 @@ cp chats.example.yml chats.yml   # edit it
 docker compose up -d
 ```
 
+Multi-arch (amd64/arm64) images are published to `ghcr.io/alkk/tg-mcp`: `latest` and `vX.Y.Z`
+follow releases, `main` tracks the main branch. `docker compose build` builds locally instead.
+
 `docker-compose.yml` mounts `chats.yml` read-only, keeps the data dir on a named volume, and
 health-checks `/ping`. It takes `TELEGRAM_TOKEN` and `AUTH_TOKEN` from the environment (or an
 `.env` file beside it) and refuses to start without them.
@@ -224,3 +229,7 @@ make build     # .bin/tg-mcp with revision injected
 
 Needs `golangci-lint`, `goimports` and `moq` on PATH. Design notes and the implementation plan
 live in `docs/plans/`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

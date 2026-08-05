@@ -4,7 +4,7 @@ services:
       context: .
       args:
         REVISION: local
-    image: tg-mcp:latest
+    image: ghcr.io/alkk/tg-mcp:latest
     container_name: tg-mcp
     hostname: tg-mcp
     restart: always

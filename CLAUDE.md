@@ -15,6 +15,9 @@ server (streamable HTTP, bearer auth) lets Claude triage and reply. Single Go bi
 - `Dockerfile` / `docker-compose.yml` / `init.sh` — multi-stage build on `ghcr.io/alkk/baseimage`;
   the image presets `DATA_DIR=/srv/data`, `CHATS_FILE=/srv/chats.yml`, `LISTEN=:8080` on top of the
   flag defaults
+- `.github/workflows/` / `.goreleaser.yml` — `ci.yml` (tests + lint), `docker.yml` (gated on ci;
+  native amd64/arm64 runners push `ghcr.io/alkk/tg-mcp` by digest, merge job assembles the
+  manifest), `release.yml` (goreleaser v2 on `v*` tags)
 
 ## Commands
 

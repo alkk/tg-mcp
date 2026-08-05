@@ -1,0 +1,37 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: set up go 1.26
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - name: test
+        run: |
+          go test -race -coverprofile=coverage.out ./...
+          grep -v "_mock.go" coverage.out | grep -v mocks > coverage_no_mocks.out
+          go tool cover -func=coverage_no_mocks.out
+
+      - name: e2e
+        run: go test -tags=e2e -race -count=1 ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
