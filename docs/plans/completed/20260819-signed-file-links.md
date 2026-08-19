@@ -206,18 +206,18 @@ mirrors `pkg/server/server.go:170` — that logs `r.URL.Path`, and reaching for 
 - Modify: `pkg/server/files.go`
 - Modify: `pkg/server/files_test.go`
 
-- [ ] add `deriveLinkKey(authToken string) []byte` computing `HMAC-SHA256(authToken, "tg-mcp/files-url/v1")`
-- [ ] add `signFileID(key []byte, id string, exp int64) string` returning 32 hex chars from the first
+- [x] add `deriveLinkKey(authToken string) []byte` computing `HMAC-SHA256(authToken, "tg-mcp/files-url/v1")`
+- [x] add `signFileID(key []byte, id string, exp int64) string` returning 32 hex chars from the first
       16 bytes of `HMAC-SHA256(key, id + "\n" + strconv.FormatInt(exp, 10))`
-- [ ] add `verifyFileSig(key []byte, id, expRaw, sig string) (expired bool, ok bool)` — parses `exp`,
+- [x] add `verifyFileSig(key []byte, id, expRaw, sig string) (expired bool, ok bool)` — parses `exp`,
       recomputes, compares with `hmac.Equal`, reports authenticity separately from expiry
-- [ ] write tests for `signFileID` (stable output for the same inputs, different output for a
+- [x] write tests for `signFileID` (stable output for the same inputs, different output for a
       different id, expiry, or key)
-- [ ] document that `expired` is only meaningful when `ok` is true, so the 401-before-410 ordering
+- [x] document that `expired` is only meaningful when `ok` is true, so the 401-before-410 ordering
       cannot be miswired at the call site
-- [ ] write tests for `verifyFileSig` (valid and unexpired, valid but expired, tampered sig, tampered
+- [x] write tests for `verifyFileSig` (valid and unexpired, valid but expired, tampered sig, tampered
       id, tampered exp, non-numeric exp, empty sig)
-- [ ] run tests - must pass before task 2
+- [x] run tests - must pass before task 2
 
 ### Task 2: Thread the TTL and link key through the server
 
@@ -227,22 +227,22 @@ mirrors `pkg/server/server.go:170` — that logs `r.URL.Path`, and reaching for 
 - Modify: `pkg/server/server_test.go`
 - Modify: `cmd/tg-mcp/main_test.go`
 
-- [ ] add `FileLinkTTL time.Duration` to `server.Params`; store `linkKey` and `linkTTL` on `Server`,
+- [x] add `FileLinkTTL time.Duration` to `server.Params`; store `linkKey` and `linkTTL` on `Server`,
       deriving the key in `New` from `p.AuthToken`
-- [ ] **default a zero `FileLinkTTL` to 5m in `New`**, mirroring the `Version` → `"dev"` default at
+- [x] **default a zero `FileLinkTTL` to 5m in `New`**, mirroring the `Version` → `"dev"` default at
       `pkg/server/server.go:91-94` — this is what keeps the six existing `New(Params{...})` call sites
       in `files_test.go` and `tools_test.go` compiling and green without touching them
-- [ ] add `FileLinkTTL time.Duration \`long:"file-link-ttl" env:"FILE_LINK_TTL" default:"5m" description:"lifetime of get_file download links"\``
+- [x] add `FileLinkTTL time.Duration \`long:"file-link-ttl" env:"FILE_LINK_TTL" default:"5m" description:"lifetime of get_file download links"\``
       to `options` in `cmd/tg-mcp/main.go`
-- [ ] reject only a *negative* `FileLinkTTL` in `validate()`, naming both the flag and the env var in
+- [x] reject only a *negative* `FileLinkTTL` in `validate()`, naming both the flag and the env var in
       the message; zero means "use the default" so `e2e_test.go`'s options literal stays valid
-- [ ] pass `FileLinkTTL: opts.FileLinkTTL` in the `server.New(server.Params{...})` call in `run`
-- [ ] add `FILE_LINK_TTL` to `clearEnv` (`cmd/tg-mcp/main_test.go:289-299`) so the defaults subtest
+- [x] pass `FileLinkTTL: opts.FileLinkTTL` in the `server.New(server.Params{...})` call in `run`
+- [x] add `FILE_LINK_TTL` to `clearEnv` (`cmd/tg-mcp/main_test.go:289-299`) so the defaults subtest
       stays independent of the ambient environment
-- [ ] write tests for `New` defaulting a zero TTL and for the derived key being stable for a token
-- [ ] write tests for `parseArgs` picking up the flag and defaulting to 5m, and for `validate`
+- [x] write tests for `New` defaulting a zero TTL and for the derived key being stable for a token
+- [x] write tests for `parseArgs` picking up the flag and defaulting to 5m, and for `validate`
       rejecting a negative value while accepting zero
-- [ ] run tests - must pass before task 3
+- [x] run tests - must pass before task 3
 
 ### Task 3: Mint signed urls in get_file
 
@@ -250,13 +250,13 @@ mirrors `pkg/server/server.go:170` — that logs `r.URL.Path`, and reaching for 
 - Modify: `pkg/server/files.go`
 - Modify: `pkg/server/files_test.go`
 
-- [ ] change `fileURL` to take the expiry and link key and append `?exp=&sig=`, keeping the existing
+- [x] change `fileURL` to take the expiry and link key and append `?exp=&sig=`, keeping the existing
       `url.PathEscape` on the id and the empty-base fallback to a listener-relative path
-- [ ] compute the expiry in `getFile` as `time.Now().Add(s.linkTTL).Unix()` and pass it through
-- [ ] write tests for `fileURL` (base from the header, expiry and signature present and verifiable,
+- [x] compute the expiry in `getFile` as `time.Now().Add(s.linkTTL).Unix()` and pass it through
+- [x] write tests for `fileURL` (base from the header, expiry and signature present and verifiable,
       empty base degrading to a relative path, id needing escaping)
-- [ ] write tests for `getFile` returning a url whose signature verifies against the server's key
-- [ ] run tests - must pass before task 4
+- [x] write tests for `getFile` returning a url whose signature verifies against the server's key
+- [x] run tests - must pass before task 4
 
 ### Task 4: Accept signatures on the /files/ route
 
@@ -267,27 +267,27 @@ mirrors `pkg/server/server.go:170` — that logs `r.URL.Path`, and reaching for 
 - Modify: `pkg/server/files_test.go`
 - Modify: `cmd/tg-mcp/e2e_test.go`
 
-- [ ] add a `fileAuth` middleware: valid bearer serves; otherwise read `exp`/`sig` from the query and
+- [x] add a `fileAuth` middleware: valid bearer serves; otherwise read `exp`/`sig` from the query and
       verify against the **decoded** `r.PathValue("id")` — the same string `store.Cached` receives at
       `pkg/server/files.go:237`
-- [ ] return `401` with the existing opaque body and `WWW-Authenticate: Bearer` for a missing,
+- [x] return `401` with the existing opaque body and `WWW-Authenticate: Bearer` for a missing,
       malformed or tampered signature; log `r.URL.Path` only, never `r.URL.String()` or `r.RequestURI`
-- [ ] return `410 Gone` for an authentic but expired signature, with a body telling the caller to
+- [x] return `410 Gone` for an authentic but expired signature, with a body telling the caller to
       call `get_file` again — verify the signature **before** checking the expiry
-- [ ] swap `s.auth` for `s.fileAuth` on the `/files/{id}` route in `Handler`, leaving `/mcp` on `s.auth`
-- [ ] add `Cache-Control: private, no-store` to `serveFile` — under bearer-only the `Authorization`
+- [x] swap `s.auth` for `s.fileAuth` on the `/files/{id}` route in `Handler`, leaving `/mcp` on `s.auth`
+- [x] add `Cache-Control: private, no-store` to `serveFile` — under bearer-only the `Authorization`
       header suppressed shared caching, and a credential-in-the-query url does not, so a caching proxy
       could otherwise keep serving attachments long past the TTL
-- [ ] update the two doc comments that assert bearer-only access: `serveFile`'s
+- [x] update the two doc comments that assert bearer-only access: `serveFile`'s
       (`pkg/server/files.go:234-235`) and `Handler`'s routing comment (`pkg/server/server.go:107`)
-- [ ] **invert the existing e2e subtest** `"the download url needs the token"`
+- [x] **invert the existing e2e subtest** `"the download url needs the token"`
       (`cmd/tg-mcp/e2e_test.go:280-283`) — that url is now signed and returns 200; rename it to say
       the url carries its own credential
-- [ ] write tests: valid sig without bearer → 200; bearer without sig → 200; tampered sig → 401;
+- [x] write tests: valid sig without bearer → 200; bearer without sig → 200; tampered sig → 401;
       authentic but expired → 410; forged **and** expired → 401 not 410; no credential at all → 401
-- [ ] write a test that an unknown id with a valid signature is still a 404, and one that an id
+- [x] write a test that an unknown id with a valid signature is still a 404, and one that an id
       needing escaping round-trips through the route
-- [ ] run tests and `make e2e` - must pass before task 5
+- [x] run tests and `make e2e` - must pass before task 5
 
 ### Task 5: Narrow the inline image types
 
@@ -295,24 +295,24 @@ mirrors `pkg/server/server.go:170` — that logs `r.URL.Path`, and reaching for 
 - Modify: `pkg/server/files.go`
 - Modify: `pkg/server/files_test.go`
 
-- [ ] extract `isInlineImage(mimeType string) bool` — exactly `image/jpeg`, `image/png`, `image/gif`,
+- [x] extract `isInlineImage(mimeType string) bool` — exactly `image/jpeg`, `image/png`, `image/gif`,
       `image/webp` — as the single place the allowlist is written; Task 6 reuses it
-- [ ] restructure the `inlineContent` switch to three arms: `isInlineImage` inlines, any other
+- [x] restructure the `inlineContent` switch to three arms: `isInlineImage` inlines, any other
       `image/` prefix returns nil for the link path, then the existing text arm. **The middle arm is
       the fix, not an extra** — without it `image/svg+xml` reaches `isTextual`, which matches the
       substring `"xml"` (`pkg/server/files.go:155`), and svg keeps inlining
-- [ ] leave the size threshold untouched
-- [ ] update the code comment to say why the set is closed — these are the types a vision model
+- [x] leave the size threshold untouched
+- [x] update the code comment to say why the set is closed — these are the types a vision model
       accepts, and an unusable `ImageContent` block fails the call where a link would have worked
-- [ ] update the existing svg expectation in `TestServeFile` (`files_test.go:237-247`), whose
+- [x] update the existing svg expectation in `TestServeFile` (`files_test.go:237-247`), whose
       behaviour changes here
-- [ ] write table-driven tests: `.heic`, `.svg`, `.bmp`, `.tif`, `.avif`, `.ico` → `inline=false` plus
+- [x] write table-driven tests: `.heic`, `.svg`, `.bmp`, `.tif`, `.avif`, `.ico` → `inline=false` plus
       a url; `.jpg`, `.png`, `.gif`, `.webp` → inlined `ImageContent`. Assert the *branch taken*, never
       the mime subtype — commit 32eee61 removed exactly that kind of platform-dependent pin
-- [ ] use non-UTF-8 fixture bytes for the rejected types, so an extension the system mime table does
+- [x] use non-UTF-8 fixture bytes for the rejected types, so an extension the system mime table does
       not know cannot sniff into `text/plain` and inline through the text arm
-- [ ] write a test for a sniffed `image/bmp` (no extension) taking the link path
-- [ ] run tests - must pass before task 6
+- [x] write a test for a sniffed `image/bmp` (no extension) taking the link path
+- [x] run tests - must pass before task 6
 
 ### Task 6: Inline thread images
 
@@ -322,32 +322,32 @@ mirrors `pkg/server/server.go:170` — that logs `r.URL.Path`, and reaching for 
 - Modify: `pkg/server/files_test.go`
 - Modify: `pkg/server/tools_test.go`
 
-- [ ] **first**, script `seededServer`'s mock with a `GetFileFunc` and `DownloadFunc`
+- [x] **first**, script `seededServer`'s mock with a `GetFileFunc` and `DownloadFunc`
       (`pkg/server/tools_test.go:28-31`) — its acme thread already holds `shot.png`
       (`tools_test.go:48-50`), and moq **panics** on a nil `GetFileFunc`
       (`pkg/server/mocks/telegram_api.go:126-128`). In a fetch goroutine that panic is unrecoverable
       and kills the whole `go test -race` binary, taking `TestToolsGetThread` and the `get_thread`
       call inside the send_reply test (`tools_test.go:556`) with it
-- [ ] add `Inlined bool` to `messageView` and a `threadImageCap = 5` constant
-- [ ] add a helper in `pkg/server/files.go` (tests in `files_test.go`, per the one-`_test.go`-per-file
+- [x] add `Inlined bool` to `messageView` and a `threadImageCap = 5` constant
+- [x] add a helper in `pkg/server/files.go` (tests in `files_test.go`, per the one-`_test.go`-per-file
       convention) that picks the first N qualifying images and fetches them via `cachedFile` under a
       10s `context.WithTimeout`, using a `sync.WaitGroup` over a preallocated indexed slice so
       chronological order is structural
-- [ ] qualification: has media, `MediaType != "sticker"`, `isInlineImage` from Task 5, and the size
+- [x] qualification: has media, `MediaType != "sticker"`, `isInlineImage` from Task 5, and the size
       re-stated after download rather than trusted from `msg.FileSize`, which the Bot API may omit
-- [ ] have the helper return the content blocks plus the set of message ids that were inlined, with
+- [x] have the helper return the content blocks plus the set of message ids that were inlined, with
       every per-image failure degrading to metadata instead of propagating
-- [ ] wire it into `getThread`: build the views, mark the inlined ones, return the blocks in a
+- [x] wire it into `getThread`: build the views, mark the inlined ones, return the blocks in a
       `*mcp.CallToolResult`; skip entirely when `s.telegram == nil`
-- [ ] **return a nil result, never an empty one, when no block was produced** — the go-sdk only
+- [x] **return a nil result, never an empty one, when no block was produced** — the go-sdk only
       synthesizes the JSON `TextContent` when `Content == nil` (`vendor/.../mcp/server.go:435-443`),
       so an empty slice strips the conversation from every image-free thread
-- [ ] write tests: 7 qualifying images → exactly 5 blocks and 5 `inlined` flags in chronological
+- [x] write tests: 7 qualifying images → exactly 5 blocks and 5 `inlined` flags in chronological
       order; one download failing → 4 blocks **and 4 flags** and the thread intact; `telegram == nil`
       → no blocks and the thread intact; a thread with no images → nil result and the JSON block still
       present; stickers and non-image media do not consume cap slots; an oversized image is skipped;
       a photo whose `file_size` is 0 is still gated by the re-stat
-- [ ] run tests - must pass before task 7
+- [x] run tests - must pass before task 7
 
 ### Task 7: Update the tool descriptions
 
@@ -355,62 +355,62 @@ mirrors `pkg/server/server.go:170` — that logs `r.URL.Path`, and reaching for 
 - Modify: `pkg/server/tools.go`
 - Modify: `pkg/server/tools_test.go`
 
-- [ ] rewrite the `get_file` description as a contract with no numbers: images and text come back in
+- [x] rewrite the `get_file` description as a contract with no numbers: images and text come back in
       the result, everything else as a short-lived download link that needs no credential
-- [ ] extend the `get_thread` description to say the first few images come back inline and the rest
+- [x] extend the `get_thread` description to say the first few images come back inline and the rest
       carry metadata for `get_file`
-- [ ] add a clause to `get_file` that the link carries its own credential and must not be sent to a
+- [x] add a clause to `get_file` that the link carries its own credential and must not be sent to a
       customer — the model holds both the url and `send_reply`, and one sentence is the cheap guard
-- [ ] write a test asserting the registered descriptions mention neither a byte threshold nor the
+- [x] write a test asserting the registered descriptions mention neither a byte threshold nor the
       bearer token
-- [ ] run tests - must pass before task 8
+- [x] run tests - must pass before task 8
 
 ### Task 8: End-to-end proof without a credential
 
 **Files:**
 - Modify: `cmd/tg-mcp/e2e_test.go`
 
-- [ ] make the fake bot api's `getFile` and download routes **file_id-keyed** — both currently answer
+- [x] make the fake bot api's `getFile` and download routes **file_id-keyed** — both currently answer
       with one hardcoded payload regardless of what was asked for (`cmd/tg-mcp/e2e_test.go:401-403`
       and `:414-416`), so a second attachment is not serveable as-is — then add an image message.
       The non-inlinable attachment already exists (message 103 / `core.dump`, `e2e_test.go:507-512`,
       fetched at `:263-272`), so nothing needs adding for that half
-- [ ] call `get_file` through the running server and read the url off the result
-- [ ] fetch that url off the listener with **no** `Authorization` header and assert 200 plus the
+- [x] call `get_file` through the running server and read the url off the result
+- [x] fetch that url off the listener with **no** `Authorization` header and assert 200 plus the
       expected bytes and `Content-Disposition: attachment`
-- [ ] assert the same url with a mangled `sig` gives 401
-- [ ] call `get_thread` on a message with images and assert image content blocks come back
-- [ ] run `make e2e` - must pass before task 9
+- [x] assert the same url with a mangled `sig` gives 401
+- [x] call `get_thread` on a message with images and assert image content blocks come back
+- [x] run `make e2e` - must pass before task 9
 
 ### Task 9: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented
-- [ ] verify edge cases are handled: expired link, forged link, unknown id, missing query string,
+- [x] verify all requirements from Overview are implemented
+- [x] verify edge cases are handled: expired link, forged link, unknown id, missing query string,
       empty base url, `telegram == nil`
-- [ ] run full test suite: `make test`
-- [ ] run e2e tests: `make e2e`
-- [ ] run `make lint` — `.golangci.yml` lints the e2e-tagged file too
-- [ ] verify test coverage meets project standard
+- [x] run full test suite: `make test`
+- [x] run e2e tests: `make e2e`
+- [x] run `make lint` — `.golangci.yml` lints the e2e-tagged file too
+- [x] verify test coverage meets project standard
 
 ### Task 10: [Final] Update documentation
 
-- [ ] update the `get_file` row in README.md's tool table and its bullet under "Behaviour worth
+- [x] update the `get_file` row in README.md's tool table and its bullet under "Behaviour worth
       knowing" — inline images and text, everything else a short-lived link needing no bearer token
-- [ ] update the `get_thread` bullet to cover the 5-image inline cap
-- [ ] add `--file-link-ttl` to README.md's flag/env table (`README.md:99-104`) and extend
+- [x] update the `get_thread` bullet to cover the 5-image inline cap
+- [x] add `--file-link-ttl` to README.md's flag/env table (`README.md:99-104`) and extend
       `--auth-token`'s description, which now also covers link signing
-- [ ] fix the three other README claims that go stale: "authenticated `/files/<id>` endpoint"
+- [x] fix the three other README claims that go stale: "authenticated `/files/<id>` endpoint"
       (`README.md:20`), "Both the MCP endpoint and `/files/` sit behind the bearer token"
       (`README.md:210`), and the curl instructions (`README.md:288-290`)
-- [ ] add a line to README.md's reverse-proxy section that the query string must reach us — a proxy
+- [x] add a line to README.md's reverse-proxy section that the query string must reach us — a proxy
       that strips it breaks every link, and the failure looks like a forged signature (401), not a
       proxy problem
-- [ ] update the package doc at `pkg/server/server.go:1-4`, which describes the bearer-guarded surface
-- [ ] rewrite CLAUDE.md's `/files/` design-constraint bullet: it currently documents bearer-only
+- [x] update the package doc at `pkg/server/server.go:1-4`, which describes the bearer-guarded surface
+- [x] rewrite CLAUDE.md's `/files/` design-constraint bullet: it currently documents bearer-only
       access and the `image/*` mime rationale, and both change here
-- [ ] add the signed-link reasoning to CLAUDE.md: stateless HMAC over id and expiry only, why the
+- [x] add the signed-link reasoning to CLAUDE.md: stateless HMAC over id and expiry only, why the
       host is not signed, why signature is checked before expiry
-- [ ] move this plan to `docs/plans/completed/`
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

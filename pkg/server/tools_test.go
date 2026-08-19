@@ -6,11 +6,13 @@ import (
 	"errors"
 	stdhtml "html"
 	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -23,11 +25,16 @@ import (
 // 24h window of get_history to cover them.
 func seedBase() time.Time { return time.Now().Add(-time.Hour).Truncate(time.Second).UTC() }
 
+// seedPayloads are the attachment bytes the seeded conversation refers to. get_thread inlines
+// images, so every fake bot api a seeded server gets has to answer for them: moq panics on an
+// unscripted call, and threadImage swallows that panic into a missing image block.
+func seedPayloads() map[string][]byte { return map[string][]byte{"f4": pngData} }
+
 // seededServer returns a server backed by a real store holding a small support conversation in
 // acme's only group plus one message in each globex group.
 func seededServer(t *testing.T) (*Server, time.Time) {
 	t.Helper()
-	return seededServerWith(t, &mocks.TelegramAPI{})
+	return seededServerWith(t, fakeAPI(seedPayloads()))
 }
 
 // seededServerWith is seededServer with a fake bot api the test can script.
@@ -287,6 +294,45 @@ func TestToolsGetThread(t *testing.T) {
 		_, _, err := s.getThread(ctx, nil, getThreadParams{Customer: "acme", MessageID: 10})
 		require.ErrorIs(t, err, store.ErrNotFound, "message ids never cross the customer boundary")
 	})
+
+	t.Run("images ride along with the conversation", func(t *testing.T) {
+		srv, _ := seededServer(t)
+
+		res, out, err := srv.getThread(ctx, nil, getThreadParams{Customer: "acme", MessageID: 2})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		require.Len(t, res.Content, 1)
+		img, ok := res.Content[0].(*mcp.ImageContent)
+		require.True(t, ok, "unexpected content type %T", res.Content[0])
+		assert.Equal(t, pngData, img.Data)
+
+		var flagged []int64
+		for _, v := range out.Messages {
+			if v.Inlined {
+				flagged = append(flagged, v.MessageID)
+			}
+		}
+		assert.Equal(t, []int64{4}, flagged, "the flags pair with the blocks by order")
+	})
+
+	t.Run("a thread without images returns no content", func(t *testing.T) {
+		res, out, err := s.getThread(ctx, nil, getThreadParams{Customer: "globex", Label: "main", MessageID: 10})
+		require.NoError(t, err)
+		assert.Nil(t, res, "an empty result would strip the conversation out of the content block")
+		assert.Equal(t, []int64{10}, messageIDs(out.Messages))
+	})
+
+	t.Run("no telegram client leaves the thread untouched", func(t *testing.T) {
+		srv := fileServer(t, nil)
+
+		res, out, err := srv.getThread(ctx, nil, getThreadParams{Customer: "acme", MessageID: 1})
+		require.NoError(t, err)
+		assert.Nil(t, res)
+		assert.Contains(t, messageIDs(out.Messages), int64(1))
+		for _, v := range out.Messages {
+			assert.False(t, v.Inlined)
+		}
+	})
 }
 
 func TestToolsGetHistory(t *testing.T) {
@@ -498,23 +544,23 @@ func TestToolsSearchDefaultLimit(t *testing.T) {
 // listed separately, never with the html it was handed.
 func echoAPI() *mocks.TelegramAPI {
 	var next int64 = 100
-	return &mocks.TelegramAPI{
-		SendMessageFunc: func(_ context.Context, chatID int64, text, parseMode string, replyTo, threadID int64) (telegram.Message, error) {
-			next++
-			if parseMode == telegram.ParseModeHTML {
-				text = plainOf(text)
-			}
-			m := telegram.Message{
-				MessageID: next, MessageThreadID: threadID, Chat: telegram.Chat{ID: chatID},
-				From: &telegram.User{ID: 42, IsBot: true, Username: "tg_mcp_bot", FirstName: "tg-mcp"},
-				Date: time.Now().Unix(), Text: text,
-			}
-			if replyTo > 0 {
-				m.ReplyToMessage = &telegram.Message{MessageID: replyTo}
-			}
-			return m, nil
-		},
+	tg := fakeAPI(seedPayloads())
+	tg.SendMessageFunc = func(_ context.Context, chatID int64, text, parseMode string, replyTo, threadID int64) (telegram.Message, error) {
+		next++
+		if parseMode == telegram.ParseModeHTML {
+			text = plainOf(text)
+		}
+		m := telegram.Message{
+			MessageID: next, MessageThreadID: threadID, Chat: telegram.Chat{ID: chatID},
+			From: &telegram.User{ID: 42, IsBot: true, Username: "tg_mcp_bot", FirstName: "tg-mcp"},
+			Date: time.Now().Unix(), Text: text,
+		}
+		if replyTo > 0 {
+			m.ReplyToMessage = &telegram.Message{MessageID: replyTo}
+		}
+		return m, nil
 	}
+	return tg
 }
 
 var htmlTag = regexp.MustCompile(`</?[a-zA-Z][^>]*>`)
@@ -967,4 +1013,38 @@ func failingServer(t *testing.T, st *mocks.MessageStore) *Server {
 	s, err := New(Params{Store: st, Chats: testConfig(t, chatMap), AuthToken: testToken})
 	require.NoError(t, err)
 	return s
+}
+
+// TestToolsDescriptions pins what the registered descriptions must not say: a byte threshold the
+// caller would branch on instead of reading the result, and a bearer token the download url no
+// longer needs.
+func TestToolsDescriptions(t *testing.T) {
+	srv := httptest.NewServer(newServer(t).Handler())
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "v1"}, nil)
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint: srv.URL + "/mcp", HTTPClient: bearerClient(testToken)}, nil)
+	require.NoError(t, err)
+	defer func() { _ = session.Close() }()
+
+	res, err := session.ListTools(ctx, nil)
+	require.NoError(t, err)
+
+	descs := make(map[string]string, len(res.Tools))
+	for _, tool := range res.Tools {
+		descs[tool.Name] = tool.Description
+		// whole words only: "number" and "member" both carry "mb", and a substring match would
+		// fail an innocent rewording with a message pointing nowhere near the cause
+		assert.NotRegexp(t, `\b(bearer|tokens?|bytes?|[kmg]i?b)\b`, strings.ToLower(tool.Description),
+			"tool %q description leaks a credential or a size threshold", tool.Name)
+	}
+
+	assert.Contains(t, descs["get_file"], "own credential")
+	assert.Contains(t, descs["get_file"], "never send it to a customer")
+	assert.Contains(t, descs["get_thread"], "inline")
+	assert.Contains(t, descs["get_thread"], "get_file")
 }

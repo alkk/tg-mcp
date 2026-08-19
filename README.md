@@ -16,8 +16,9 @@ Single Go binary, no CGO. Chat ids never leave the server: every tool speaks in 
   quietly at debug level. The update offset advances only after the batch is committed, so a
   crash redelivers instead of losing messages.
 - **store** — SQLite in WAL mode, FTS5 full-text search, lazy on-disk cache for attachments.
-- **serve** — MCP over streamable HTTP at `/mcp`, `/ping` for health checks, and an
-  authenticated `/files/<id>` endpoint for attachments too large to inline.
+- **serve** — MCP over streamable HTTP at `/mcp`, `/ping` for health checks, and a
+  `/files/<id>` endpoint for attachments that do not come back inline. That route takes either
+  credential: the bearer token, or the short-lived signature `get_file` mints into the url.
 
 Accepted Bot API constraints: no history backfill (logging starts when the bot joins),
 deletions are never delivered, and the cloud API caps `getFile` at 20 MB — a self-hosted
@@ -29,10 +30,10 @@ deletions are never delivered, and the cloud API caps `getFile` at 20 MB — a s
 |---|---|---|
 | `list_customers` | — | customers, their group labels, unread counts |
 | `list_new` | `customer?, limit?` | messages above the triage cursor, oldest first (limit 100) |
-| `get_thread` | `customer, message_id, label?` | the reply chain plus everything said around it |
+| `get_thread` | `customer, message_id, label?` | the reply chain plus everything said around it, first images inline |
 | `get_history` | `customer, from?, to?, limit?, label?, cursor?` | chronological bulk, defaults to the last 24h (limit 200) |
 | `search` | `query, customer?, from?, to?, limit?` | FTS5 hits with snippets (limit 50) |
-| `get_file` | `customer, message_id, label?` | image/text inline, larger files as a download URL |
+| `get_file` | `customer, message_id, label?` | readable images and text inline, everything else as a signed download URL |
 | `send_reply` | `customer, text, reply_to?, label?` | renders a markdown subset, sends as the bot and logs the sent message |
 | `mark_handled` | `customer, message_id, label?` | advances the triage cursor |
 
@@ -54,7 +55,13 @@ groups and nothing else pins one down, the error lists the available labels.
   member of that chain, then fills in every message sent between the first and last of them
   (±5 minutes) — answers typed without hitting "reply" belong to the thread too. In a forum
   group that fill stays inside the anchor's topic. Capped at 500 messages around the anchor, with
-  `truncated: true` when it cut.
+  `truncated: true` when it cut. The first 5 images a vision model can read — under 1 MiB and
+  excluding stickers, since five 👍 reactions would otherwise eat the cap — come back as image
+  content alongside the conversation, in chronological order, with `inlined: true` on the messages
+  they belong to; everything past the cap — and every other attachment — carries metadata to fetch
+  with `get_file`. The images live in `content` and the conversation in `structured_content`, the
+  same split `get_file` uses. An attachment that fails to download, or whose bytes turn out not to
+  be the image its name claims, degrades to metadata rather than failing the read.
 - **`get_history`** takes both bounds inclusive and keeps the newest of the range. A full page
   comes with a `next_cursor`; pass it back as `cursor` to read what came before it, with nothing
   repeated and nothing skipped. Timestamps alone could not do that — Telegram stamps whole
@@ -67,9 +74,13 @@ groups and nothing else pins one down, the error lists the available labels.
   tokenization would throw it away and answer a different question (`50%` matching every `50`).
   Only when nothing carries the punctuation literally does the loose match get a turn. Quote a
   phrase to keep it together. Edits reindex — the pre-edit text stops matching.
-- **`get_file`** returns images and text inline under 1 MiB; anything larger or binary comes back
-  as a `/files/<id>` url plus metadata. Files are downloaded from Telegram on first request and
-  cached on disk afterwards.
+- **`get_file`** returns inline only what the model can actually read: `image/jpeg`, `image/png`,
+  `image/gif` and `image/webp` as image content, textual files as text, both under 1 MiB. Anything
+  else — `heic`, `svg`, `bmp`, `tiff`, `avif`, every binary, anything larger — comes back as a
+  `/files/<id>` url plus metadata. That url is signed and expires (`--file-link-ttl`, 5 minutes by
+  default), so it needs no bearer token and must not be handed to a customer: whoever holds it can
+  read the attachment until it expires. Mint a fresh one with another `get_file` call. Files are
+  downloaded from Telegram on first request and cached on disk afterwards.
 - **`send_reply`** renders a markdown subset to Telegram HTML before sending: fenced and inline
   code, `**bold**`, `*italic*`, `[links](url)` whose target carries an `https://`, `http://`,
   `tg://`, `mailto:` or `tel:` scheme, and `# ` headings as bold lines. Underscores never
@@ -101,7 +112,8 @@ Flags and environment variables are equivalent (`--telegram.token` == `TELEGRAM_
 | `--telegram.token` | `TELEGRAM_TOKEN` | — | bot token (required) |
 | `--telegram.api-url` | `TELEGRAM_API_URL` | `https://api.telegram.org` | Bot API base url |
 | `--telegram.local` | `TELEGRAM_LOCAL` | `false` | API server runs with `--local`: `getFile` returns filesystem paths |
-| `--auth-token` | `AUTH_TOKEN` | — | bearer token for `/mcp` and `/files/` (required) |
+| `--auth-token` | `AUTH_TOKEN` | — | bearer token for `/mcp` and `/files/`, and the secret download links are signed with; must be high-entropy random (required) |
+| `--file-link-ttl` | `FILE_LINK_TTL` | `5m` | lifetime of the download links `get_file` hands out |
 | `--listen` | `LISTEN` | `:8080` | http listen address |
 | `--data` | `DATA_DIR` | `./data` | data directory (SQLite db + file cache) |
 | `--chats` | `CHATS_FILE` | `chats.yml` | chat map file |
@@ -109,6 +121,12 @@ Flags and environment variables are equivalent (`--telegram.token` == `TELEGRAM_
 
 `--telegram.local` is explicit rather than probed: a missing shared volume must fail loudly
 instead of falling through to a confusing 404.
+
+Download links are signed with a key derived from `--auth-token`, so there is no second secret to
+manage — and rotating the token invalidates every link already handed out. The flip side is that a
+link which leaks (a proxy access log, say) can be used offline to test guesses at the token, so
+`--auth-token` must be a high-entropy random value — `openssl rand -hex 32` — and never a
+passphrase anyone could enumerate.
 
 ### Chat map
 
@@ -207,10 +225,12 @@ The trailing slash on `proxy_pass` strips the prefix, so `/tg-mcp/mcp` reaches `
 (`https://tg.example.com/tg-mcp/ping`) — it stays unauthenticated, so keep it off the public
 listener if that matters.
 
-Both the MCP endpoint and `/files/` sit behind the bearer token; the proxy does not need to add
-anything, but it must pass the `Authorization` header through untouched. A prefix that is not a
-plain absolute path (a full url, a query string) is ignored rather than trusted — links then fall
-back to the host root.
+`/mcp` sits behind the bearer token and `/files/` takes either that token or the signature in the
+url; the proxy does not need to add anything, but it must pass the `Authorization` header through
+untouched **and leave the query string alone**. A `rewrite` or a `proxy_pass` with its own path
+that drops arguments strips `exp` and `sig`, and every download then fails as 401 — which reads as
+a forged link, not as a proxy problem. A prefix that is not a plain absolute path (a full url, a
+query string) is ignored rather than trusted — links then fall back to the host root.
 
 Traefik and Caddy set `X-Forwarded-Host` / `-Proto` on their own. For a prefixed mount, Traefik's
 `stripPrefix` middleware adds `X-Forwarded-Prefix` as well; in Caddy, `handle_path` strips the
@@ -284,10 +304,15 @@ Claude Desktop has no native HTTP transport, so bridge it through `mcp-remote` i
 }
 ```
 
-Attachments served as urls are plain authenticated GETs:
+The url `get_file` returns is signed and works on its own — `curl -O "<url>"`, no header — until
+it expires; an expired link answers `410` naming the moment it lapsed, so call `get_file` again for
+a fresh one. Anything else wrong with the credential — missing, mangled, forged — is an opaque
+`401` on purpose: a bad signature must not learn from a `410` that the id exists. The bearer token
+works there too, and never expires:
 `curl -H "Authorization: Bearer <auth-token>" https://<host>/files/<id> -O`. The response carries
 no `filename=`, so `-O` names the download after the id — the real name is `file_name` in the
-`get_file` result (and in every listing tool).
+`get_file` result (and in every listing tool). Quote the url: the signature rides in the query
+string, and an unquoted `&` puts curl in the background.
 
 ## Backups
 

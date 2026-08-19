@@ -11,7 +11,8 @@ server (streamable HTTP, bearer auth) lets Claude triage and reply. Single Go bi
 - `pkg/telegram` — minimal Bot API client (getMe, getUpdates, deleteWebhook, sendMessage, getFile, download)
 - `pkg/ingest` — long-poll loop, allowlist filter, store writes
 - `pkg/store` — SQLite (WAL): `store.go` schema/upsert/cursors/history, `thread.go`, `search.go`, `files.go` cache
-- `pkg/server` — `server.go` transport/auth/slug resolution, `tools.go` the 8 MCP tools, `files.go` `/files/`
+- `pkg/server` — `server.go` transport/auth/slug resolution, `tools.go` the 8 MCP tools,
+  `files.go` attachments: inlining, thread images, link signing, `/files/`
 - `pkg/tghtml` — `Render`: markdown subset → Telegram HTML, hand-rolled scanner, no dependencies
 - `Dockerfile` / `docker-compose.yml` / `init.sh` — multi-stage build on `ghcr.io/alkk/baseimage`;
   the image presets `DATA_DIR=/srv/data`, `CHATS_FILE=/srv/chats.yml`, `LISTEN=:8080` on top of the
@@ -79,6 +80,50 @@ These are decisions, not accidents — changing one needs a reason.
   one) and the tool call reads it back from `CallToolRequest.Extra.Header`: no shared state, so a
   concurrent call on another hostname cannot repoint the links of this one, and a download curl'd
   off the listener never touches them.
+- **download links carry their own credential, statelessly.** `/files/` takes either the bearer
+  token or the `exp`+`sig` pair `get_file` mints into the url: an MCP harness only speaks MCP, so
+  it never sees the token, and a bearer-only link points at bytes the primary consumer structurally
+  cannot fetch. The key is `HMAC-SHA256(authToken, "tg-mcp/files-url/v1")`, derived once in `New` —
+  no second secret to configure, domain-separated so it cannot be confused with the auth token
+  itself, rotated when the token is. The price of that single secret is that a leaked link is an
+  offline oracle for the token, so README requires a high-entropy random one; a second configured
+  secret would only move the same requirement onto another value. The mac covers `file_unique_id +
+  "\n" + exp` and **nothing else — never host, scheme or prefix**: the base is rebuilt per request
+  from `X-Forwarded-*`, so signing it would break the moment a download took a different path than
+  the `/mcp` call did, and it would quietly reintroduce the public-url coupling `requestBase`
+  exists to avoid. The id is telegram's raw base64url `file_unique_id`, which cannot contain the
+  `\n`, so the mac input stays injective. No token table: a map buys single-use at the cost of a
+  mutex, a sweeper and links dying on restart — and single-use is a thin prize, since a harness
+  retrying a failed download is legitimate and a minutes-long window makes replay near-worthless.
+  **Authenticity is decided before the expiry**, so a forged link gets the same opaque 401 as no
+  credential at all and the 410 never tells a stranger that an id exists. That 401 path logs
+  `r.URL.Path` only — `r.URL.String()` or `r.RequestURI` would write a live signature into the log
+  for its whole TTL. `serveFile` sends `Cache-Control: private, no-store`: under bearer-only the
+  `Authorization` header suppressed shared caching and a credential in the query string does not. A
+  zero `FileLinkTTL` means 5 minutes, the way an empty `Version` means `dev`; a negative one is
+  rejected by both `New` and `validate`.
+- **only what a vision model reads is inlined** — `image/jpeg`, `image/png`, `image/gif`,
+  `image/webp`, and `isInlineImage` is the one place that list is written. Every other `image/`
+  type takes the link path in its own switch arm *before* the text arm, because `isTextual` matches
+  the substring `xml` and would otherwise inline `image/svg+xml` as text. An `ImageContent` block
+  the vision API rejects fails the whole call, where a link would have worked. **The name alone
+  never decides**: the extension is the customer's, so `inlineContent` also requires
+  `http.DetectContentType` to sniff an inlinable image and the block carries the *sniffed* type,
+  which is the one the vision API reads — a zip called `shot.png` takes the link path instead of
+  failing the call, while `fileResult.MimeType` stays name-derived. `get_thread` reuses the
+  predicate for the first `threadImageCap` (5) qualifying images, skipping stickers — they are
+  `.webp` too, so five 👍 reactions would burn the cap and trigger five downloads per read — and
+  gating on the size twice: `msg.FileSize` before the fetch, so a rendition the row already knows
+  is oversized never burns a slot or a download, and the size re-stated off disk after it, since
+  `msg.FileSize` is optional in the Bot API and may be 0. Every per-image failure degrades to
+  metadata: an attachment problem must never fail a conversation read — which is also why
+  `threadImage` recovers, since it runs on its own goroutine where a panic would kill the process
+  rather than one image. When nothing qualifies `getThread` returns a **nil** result, never an
+  empty one — the go-sdk only synthesizes the serialized-JSON `TextContent` block when
+  `Content == nil`, so an empty slice would strip the conversation out of every image-free thread.
+  The mirror of that rule is accepted on the happy path: once `Content` is non-nil the sdk does not
+  append the JSON fallback either (`messagesResult` is object JSON), so a thread that inlines
+  images carries the conversation in `structuredContent` alone, the shape `get_file` already has.
 - **attachments are stored flat and content-addressed** at `files/<hex(file_unique_id)>`, never
   under their telegram name. The id keys *bytes*, not names: with a directory per id, a file
   resent under a second name put two entries in one slot and left `Cached` picking by `ReadDir`

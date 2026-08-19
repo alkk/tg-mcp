@@ -1,7 +1,8 @@
 // Package server exposes the message store to MCP clients: a streamable HTTP endpoint at /mcp
-// guarded by a static bearer token, plus an unauthenticated /ping health check. Every tool
-// addresses chats by customer slug and optional group label — raw telegram chat ids never leave
-// the process.
+// guarded by a static bearer token, a /files/ download route taking either that token or the
+// short-lived signature get_file mints into the url, plus an unauthenticated /ping health check.
+// Every tool addresses chats by customer slug and optional group label — raw telegram chat ids
+// never leave the process.
 package server
 
 import (
@@ -52,6 +53,7 @@ type telegramAPI interface {
 const (
 	serverName      = "tg-mcp"
 	shutdownTimeout = 5 * time.Second
+	defaultLinkTTL  = 5 * time.Minute
 )
 
 // Params configures the MCP server; Store, Chats and AuthToken are mandatory.
@@ -62,6 +64,8 @@ type Params struct {
 	AuthToken string
 	Listen    string
 	Version   string
+	// FileLinkTTL is how long a signed /files/ link stays valid; zero means defaultLinkTTL.
+	FileLinkTTL time.Duration
 }
 
 // Server serves MCP over streamable HTTP.
@@ -71,6 +75,8 @@ type Server struct {
 	chats    *config.Config
 	token    string
 	listen   string
+	linkKey  []byte
+	linkTTL  time.Duration
 	mcp      *mcp.Server
 
 	mu   sync.RWMutex
@@ -86,11 +92,17 @@ func New(p Params) (*Server, error) {
 		return nil, errors.New("store is required")
 	case p.Chats == nil:
 		return nil, errors.New("chat map is required")
+	case p.FileLinkTTL < 0:
+		return nil, errors.New("file link ttl cannot be negative")
 	}
 
 	version := p.Version
 	if version == "" {
 		version = "dev"
+	}
+	linkTTL := p.FileLinkTTL
+	if linkTTL == 0 {
+		linkTTL = defaultLinkTTL
 	}
 	s := &Server{
 		store:    p.Store,
@@ -98,13 +110,16 @@ func New(p Params) (*Server, error) {
 		chats:    p.Chats,
 		token:    p.AuthToken,
 		listen:   p.Listen,
+		linkKey:  deriveLinkKey(p.AuthToken),
+		linkTTL:  linkTTL,
 	}
 	s.mcp = mcp.NewServer(&mcp.Implementation{Name: serverName, Version: version}, nil)
 	s.registerTools()
 	return s, nil
 }
 
-// Handler builds the HTTP routing: /mcp behind bearer auth, /ping open for health checks.
+// Handler builds the HTTP routing: /mcp behind bearer auth, /files/ behind either the bearer
+// token or the signature get_file minted into the url, /ping open for health checks.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ping", func(w http.ResponseWriter, _ *http.Request) {
@@ -113,7 +128,7 @@ func (s *Server) Handler() http.Handler {
 	})
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s.mcp }, nil)
 	mux.Handle("/mcp", s.auth(s.trackBase(mcpHandler)))
-	mux.Handle("GET "+filesRoute+"{id}", s.auth(http.HandlerFunc(s.serveFile)))
+	mux.Handle("GET "+filesRoute+"{id}", s.fileAuth(http.HandlerFunc(s.serveFile)))
 	return mux
 }
 
@@ -173,6 +188,35 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+// fileAuth guards the download route with either credential: the bearer token, as /mcp is, or the
+// signature get_file minted into the url — an MCP harness only speaks MCP, so it never sees the
+// token and the link has to carry its own. Authenticity is decided before the expiry, so a forged
+// link gets the same opaque 401 as no credential at all and a 410 never tells a stranger that an
+// id exists.
+func (s *Server) fileAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.authorized(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		q := r.URL.Query()
+		exp, expired, ok := verifyFileSig(s.linkKey, r.PathValue("id"), q.Get("exp"), q.Get("sig"))
+		switch {
+		case !ok:
+			// the path only, never r.URL.String() or r.RequestURI: those carry a signature that
+			// stays usable for the rest of its ttl, and a log line outlives it by years
+			slog.Warn("unauthorized file request", "path", r.URL.Path, "remote", r.RemoteAddr)
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		case expired:
+			http.Error(w, fmt.Sprintf("download link expired at %s, call get_file again for a fresh one",
+				time.Unix(exp, 0).UTC().Format(time.RFC3339)), http.StatusGone)
+		default:
+			next.ServeHTTP(w, r)
+		}
 	})
 }
 

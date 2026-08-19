@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"syscall"
+	"time"
 
 	"github.com/jessevdk/go-flags"
 	"golang.org/x/sync/errgroup"
@@ -29,11 +30,12 @@ type options struct {
 		Local  bool   `long:"local" env:"LOCAL" description:"bot api server runs with --local, getFile returns filesystem paths"`
 	} `group:"telegram" namespace:"telegram" env-namespace:"TELEGRAM"`
 
-	AuthToken string `long:"auth-token" env:"AUTH_TOKEN" description:"bearer token for the mcp endpoint"`
-	Listen    string `long:"listen" env:"LISTEN" default:":8080" description:"http listen address"`
-	Data      string `long:"data" env:"DATA_DIR" default:"./data" description:"data directory for sqlite db and file cache"`
-	Chats     string `long:"chats" env:"CHATS_FILE" default:"chats.yml" description:"chat map file"`
-	Dbg       bool   `long:"dbg" env:"DEBUG" description:"debug logging"`
+	AuthToken   string        `long:"auth-token" env:"AUTH_TOKEN" description:"bearer token for the mcp and files endpoints, and the secret download links are signed with"`
+	Listen      string        `long:"listen" env:"LISTEN" default:":8080" description:"http listen address"`
+	Data        string        `long:"data" env:"DATA_DIR" default:"./data" description:"data directory for sqlite db and file cache"`
+	Chats       string        `long:"chats" env:"CHATS_FILE" default:"chats.yml" description:"chat map file"`
+	FileLinkTTL time.Duration `long:"file-link-ttl" env:"FILE_LINK_TTL" default:"5m" description:"lifetime of get_file download links"`
+	Dbg         bool          `long:"dbg" env:"DEBUG" description:"debug logging"`
 }
 
 func main() {
@@ -101,12 +103,13 @@ func run(ctx context.Context, opts *options) error {
 	slog.Info("bot identified", "id", me.ID, "username", me.Username, "chats", len(chats.All()))
 
 	srv, err := server.New(server.Params{
-		Store:     st,
-		Telegram:  tg,
-		Chats:     chats,
-		AuthToken: opts.AuthToken,
-		Listen:    opts.Listen,
-		Version:   resolveVersion(),
+		Store:       st,
+		Telegram:    tg,
+		Chats:       chats,
+		AuthToken:   opts.AuthToken,
+		Listen:      opts.Listen,
+		Version:     resolveVersion(),
+		FileLinkTTL: opts.FileLinkTTL,
 	})
 	if err != nil {
 		return fmt.Errorf("create mcp server: %w", err)
@@ -143,6 +146,8 @@ func validate(opts *options) error {
 		return errors.New("telegram bot token is required (--telegram.token, TELEGRAM_TOKEN)")
 	case opts.AuthToken == "":
 		return errors.New("mcp auth token is required (--auth-token, AUTH_TOKEN)")
+	case opts.FileLinkTTL < 0:
+		return errors.New("file link ttl cannot be negative (--file-link-ttl, FILE_LINK_TTL)")
 	}
 	return nil
 }

@@ -30,6 +30,7 @@ func TestParseArgs(t *testing.T) {
 		assert.Equal(t, ":8080", opts.Listen)
 		assert.Equal(t, "./data", opts.Data)
 		assert.Equal(t, "chats.yml", opts.Chats)
+		assert.Equal(t, 5*time.Minute, opts.FileLinkTTL)
 		assert.False(t, opts.Dbg)
 	})
 
@@ -37,7 +38,8 @@ func TestParseArgs(t *testing.T) {
 		clearEnv(t)
 		opts, err := parseArgs([]string{
 			"--telegram.token=bot-token", "--telegram.api-url=http://localhost:8081", "--telegram.local",
-			"--auth-token=secret", "--listen=127.0.0.1:9000", "--data=/tmp/tg", "--chats=/etc/chats.yml", "--dbg",
+			"--auth-token=secret", "--listen=127.0.0.1:9000", "--data=/tmp/tg", "--chats=/etc/chats.yml",
+			"--file-link-ttl=30s", "--dbg",
 		})
 		require.NoError(t, err)
 		assert.Equal(t, "bot-token", opts.Telegram.Token)
@@ -47,6 +49,7 @@ func TestParseArgs(t *testing.T) {
 		assert.Equal(t, "127.0.0.1:9000", opts.Listen)
 		assert.Equal(t, "/tmp/tg", opts.Data)
 		assert.Equal(t, "/etc/chats.yml", opts.Chats)
+		assert.Equal(t, 30*time.Second, opts.FileLinkTTL)
 		assert.True(t, opts.Dbg)
 	})
 
@@ -59,6 +62,7 @@ func TestParseArgs(t *testing.T) {
 		t.Setenv("LISTEN", ":7070")
 		t.Setenv("DATA_DIR", "/var/lib/tg-mcp")
 		t.Setenv("CHATS_FILE", "/cfg/chats.yml")
+		t.Setenv("FILE_LINK_TTL", "90s")
 		t.Setenv("DEBUG", "true")
 
 		opts, err := parseArgs(nil)
@@ -70,6 +74,7 @@ func TestParseArgs(t *testing.T) {
 		assert.Equal(t, ":7070", opts.Listen)
 		assert.Equal(t, "/var/lib/tg-mcp", opts.Data)
 		assert.Equal(t, "/cfg/chats.yml", opts.Chats)
+		assert.Equal(t, 90*time.Second, opts.FileLinkTTL)
 		assert.True(t, opts.Dbg)
 	})
 
@@ -120,6 +125,11 @@ func TestRunStartupFailures(t *testing.T) {
 			wantErr: "mcp auth token is required",
 		},
 		{
+			name:    "negative file link ttl",
+			opts:    func(_ *testing.T, o *options) { o.FileLinkTTL = -time.Second },
+			wantErr: "file link ttl cannot be negative",
+		},
+		{
 			name:    "missing chat map",
 			opts:    func(t *testing.T, o *options) { o.Chats = filepath.Join(t.TempDir(), "absent.yml") },
 			wantErr: "load chat map",
@@ -165,6 +175,32 @@ func TestRunStartupFailures(t *testing.T) {
 			err := run(ctx, opts)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestValidateFileLinkTTL(t *testing.T) {
+	tests := []struct {
+		name    string
+		ttl     time.Duration
+		wantErr string
+	}{
+		{name: "zero means the server default", ttl: 0},
+		{name: "positive", ttl: time.Minute},
+		{name: "negative", ttl: -time.Minute, wantErr: "file link ttl cannot be negative (--file-link-ttl, FILE_LINK_TTL)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := &options{AuthToken: "secret", FileLinkTTL: tt.ttl}
+			opts.Telegram.Token = "bot-token"
+
+			err := validate(opts)
+			if tt.wantErr != "" {
+				require.EqualError(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
 		})
 	}
 }
@@ -290,7 +326,7 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
 		"TELEGRAM_TOKEN", "TELEGRAM_API_URL", "TELEGRAM_LOCAL",
-		"AUTH_TOKEN", "LISTEN", "DATA_DIR", "CHATS_FILE", "DEBUG",
+		"AUTH_TOKEN", "LISTEN", "DATA_DIR", "CHATS_FILE", "FILE_LINK_TTL", "DEBUG",
 	} {
 		if v, ok := os.LookupEnv(k); ok {
 			t.Setenv(k, v) // registers restore on cleanup

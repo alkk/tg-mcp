@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,6 +78,12 @@ func TestNew(t *testing.T) {
 			params:  Params{Store: &mocks.MessageStore{}, AuthToken: testToken},
 			wantErr: "chat map is required",
 		},
+		{
+			name: "negative file link ttl",
+			params: Params{Store: &mocks.MessageStore{}, Chats: cfg, AuthToken: testToken,
+				FileLinkTTL: -time.Second},
+			wantErr: "file link ttl cannot be negative",
+		},
 	}
 
 	for _, tt := range tests {
@@ -90,6 +98,38 @@ func TestNew(t *testing.T) {
 			require.NotNil(t, s.mcp)
 		})
 	}
+}
+
+func TestNewFileLinkTTL(t *testing.T) {
+	cfg := testConfig(t, chatMap)
+
+	t.Run("zero falls back to the default", func(t *testing.T) {
+		s, err := New(Params{Store: &mocks.MessageStore{}, Chats: cfg, AuthToken: testToken})
+		require.NoError(t, err)
+		assert.Equal(t, defaultLinkTTL, s.linkTTL)
+	})
+
+	t.Run("explicit ttl kept", func(t *testing.T) {
+		s, err := New(Params{Store: &mocks.MessageStore{}, Chats: cfg, AuthToken: testToken,
+			FileLinkTTL: 30 * time.Second})
+		require.NoError(t, err)
+		assert.Equal(t, 30*time.Second, s.linkTTL)
+	})
+}
+
+func TestNewLinkKey(t *testing.T) {
+	cfg := testConfig(t, chatMap)
+	newFor := func(token string) *Server {
+		s, err := New(Params{Store: &mocks.MessageStore{}, Chats: cfg, AuthToken: token})
+		require.NoError(t, err)
+		return s
+	}
+
+	key := newFor(testToken).linkKey
+	assert.NotEmpty(t, key)
+	assert.NotEqual(t, []byte(testToken), key, "the link key is not the bearer token")
+	assert.Equal(t, key, newFor(testToken).linkKey, "stable for the same token")
+	assert.NotEqual(t, key, newFor("other").linkKey, "rotates with the token")
 }
 
 func TestServerPing(t *testing.T) {
@@ -323,4 +363,69 @@ func (t bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	clone := r.Clone(r.Context())
 	clone.Header.Set("Authorization", "Bearer "+t.token)
 	return http.DefaultTransport.RoundTrip(clone) //nolint:wrapcheck // transport errors pass through
+}
+
+// TestServerFileAuth exercises the download route's two credentials directly: the bearer token, and
+// the signature get_file mints into the url for a harness that never sees the token.
+func TestServerFileAuth(t *testing.T) {
+	s := newServer(t)
+	guarded := s.fileAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+
+	const id = "u1"
+	live := time.Now().Add(time.Minute).Unix()
+	past := time.Now().Add(-time.Minute).Unix()
+
+	tests := []struct {
+		name       string
+		token      string
+		query      string
+		wantStatus int
+	}{
+		{name: "signature without a token", query: signedQuery(s.linkKey, id, live), wantStatus: http.StatusTeapot},
+		{name: "token without a signature", token: testToken, wantStatus: http.StatusTeapot},
+		{name: "no credential at all", wantStatus: http.StatusUnauthorized},
+		{name: "tampered signature", query: "exp=" + strconv.FormatInt(live, 10) + "&sig=" +
+			strings.Repeat("0", 2*sigBytes), wantStatus: http.StatusUnauthorized},
+		{name: "signature of another id", query: signedQuery(s.linkKey, "u2", live), wantStatus: http.StatusUnauthorized},
+		{name: "tampered expiry", query: "exp=" + strconv.FormatInt(live+1, 10) + "&sig=" +
+			signFileID(s.linkKey, id, live), wantStatus: http.StatusUnauthorized},
+		{name: "non-numeric expiry", query: "exp=soon&sig=" + signFileID(s.linkKey, id, live),
+			wantStatus: http.StatusUnauthorized},
+		{name: "another server's key", query: signedQuery(deriveLinkKey("other"), id, live),
+			wantStatus: http.StatusUnauthorized},
+		{name: "authentic but expired", query: signedQuery(s.linkKey, id, past), wantStatus: http.StatusGone},
+		{name: "forged and expired", query: "exp=" + strconv.FormatInt(past, 10) + "&sig=" +
+			strings.Repeat("0", 2*sigBytes), wantStatus: http.StatusUnauthorized},
+		{name: "expired signature plus a valid token", token: testToken,
+			query: signedQuery(s.linkKey, id, past), wantStatus: http.StatusTeapot},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/files/"+id+"?"+tt.query, http.NoBody)
+			req.SetPathValue("id", id)
+			if tt.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tt.token)
+			}
+			rec := httptest.NewRecorder()
+			guarded.ServeHTTP(rec, req)
+
+			assert.Equal(t, tt.wantStatus, rec.Code)
+			assert.NotContains(t, rec.Body.String(), testToken)
+			switch tt.wantStatus {
+			case http.StatusUnauthorized:
+				assert.Equal(t, "Bearer", rec.Header().Get("WWW-Authenticate"))
+				assert.Equal(t, "unauthorized\n", rec.Body.String(), "a forged link learns nothing")
+			case http.StatusGone:
+				assert.Contains(t, rec.Body.String(), "get_file", "the caller is told how to self-heal")
+				assert.Contains(t, rec.Body.String(), time.Unix(past, 0).UTC().Format(time.RFC3339))
+			}
+		})
+	}
+}
+
+func signedQuery(key []byte, id string, exp int64) string {
+	return "exp=" + strconv.FormatInt(exp, 10) + "&sig=" + signFileID(key, id, exp)
 }

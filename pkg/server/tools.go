@@ -57,6 +57,9 @@ type messageView struct {
 	Media     string `json:"media,omitempty"`
 	FileName  string `json:"file_name,omitempty"`
 	FileSize  int64  `json:"file_size,omitempty"`
+	// Inlined marks a message whose image came along as a content block. The blocks are a flat
+	// list with no link back, so the flags pair with them by chronological order.
+	Inlined bool `json:"inlined,omitempty"`
 }
 
 // messagesResult is what every listing tool returns; Truncated is only ever set by get_thread and
@@ -157,7 +160,9 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name: "get_thread",
 		Description: "Reconstruct the conversation around a message: its reply chain, every reply " +
-			"hanging off it, and everything the group said in the same time span.",
+			"hanging off it, and everything the group said in the same time span. The first " +
+			"few readable images come back inline, flagged with inlined on their message; " +
+			"every other attachment carries metadata to fetch with get_file.",
 		Annotations: readOnly,
 	}, s.getThread)
 
@@ -177,8 +182,11 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name: "get_file",
-		Description: "Fetch the attachment of a message. Images and text come back in the result; " +
-			"anything larger is downloaded from the returned url with the same bearer token.",
+		Description: "Fetch the attachment of a message. Images a vision model can read and " +
+			"textual files come back in the result; everything else comes back as a " +
+			"short-lived download url. That url carries its own credential and needs no " +
+			"other, so never send it to a customer — anyone holding it can read the " +
+			"attachment until it expires.",
 		Annotations: readOnly,
 	}, s.getFile)
 
@@ -420,7 +428,19 @@ func (s *Server) getThread(ctx context.Context, _ *mcp.CallToolRequest,
 	if err != nil {
 		return nil, messagesResult{}, fmt.Errorf("reconstruct thread: %w", err)
 	}
-	return nil, messagesResult{Messages: s.views(thread.Messages), Truncated: thread.Truncated}, nil
+
+	res := messagesResult{Messages: s.views(thread.Messages), Truncated: thread.Truncated}
+	blocks, inlined := s.threadImages(ctx, thread.Messages)
+	if len(blocks) == 0 {
+		// a nil result, never an empty one: the go-sdk only synthesizes the json text block when
+		// Content is nil, so an empty slice would strip the conversation out of every thread
+		// without images
+		return nil, res, nil
+	}
+	for i := range res.Messages {
+		res.Messages[i].Inlined = inlined[res.Messages[i].MessageID]
+	}
+	return &mcp.CallToolResult{Content: blocks}, res, nil
 }
 
 func (s *Server) getHistory(ctx context.Context, _ *mcp.CallToolRequest,

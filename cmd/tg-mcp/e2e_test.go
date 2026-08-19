@@ -11,7 +11,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -29,7 +31,13 @@ const (
 	e2eBotName   = "support_bot"
 	e2eChatID    = -1001234567890
 	e2eOtherChat = -1009876543210
-	e2eFilePath  = "documents/core.dump"
+	// the fake api serves every attachment under one directory keyed by file id
+	e2eFileDir     = "attachments/"
+	e2eDumpFileID  = "doc-1"
+	e2eImageFileID = "photo-1"
+	// deliberately not the 5m both the flag and the server default to, so a link ttl that never
+	// reaches the server is visible instead of coincidentally right
+	e2eLinkTTL = 17 * time.Minute
 )
 
 // e2eMessage mirrors the message view the tools hand out; the server-side type is unexported.
@@ -48,6 +56,7 @@ type e2eMessage struct {
 	Media     string `json:"media"`
 	FileName  string `json:"file_name"`
 	FileSize  int64  `json:"file_size"`
+	Inlined   bool   `json:"inlined"`
 }
 
 type e2eMessages struct {
@@ -93,10 +102,11 @@ func TestE2ESmoke(t *testing.T) {
 	api := startFakeAPI(t)
 
 	opts := &options{
-		AuthToken: e2eAuthToken,
-		Listen:    freeAddr(t),
-		Data:      t.TempDir(),
-		Chats:     writeChats(t, fmt.Sprintf("chats:\n  %d:\n    customer: acme\n", e2eChatID)),
+		AuthToken:   e2eAuthToken,
+		Listen:      freeAddr(t),
+		Data:        t.TempDir(),
+		Chats:       writeChats(t, fmt.Sprintf("chats:\n  %d:\n    customer: acme\n", e2eChatID)),
+		FileLinkTTL: e2eLinkTTL,
 	}
 	opts.Telegram.Token = e2eBotToken
 	opts.Telegram.APIURL = api.URL
@@ -149,7 +159,7 @@ func TestE2ESmoke(t *testing.T) {
 	require.Eventually(t, func() bool {
 		listed = e2eMessages{}
 		callTool(ctx, t, session, "list_new", nil, &listed)
-		return len(listed.Messages) == 3
+		return len(listed.Messages) == 4
 	}, 15*time.Second, 50*time.Millisecond, "ingest did not store the scripted batch: %+v", listed)
 
 	t.Run("list_new shows the ingested messages", func(t *testing.T) {
@@ -161,13 +171,14 @@ func TestE2ESmoke(t *testing.T) {
 			assert.Empty(t, m.Text, "listings carry a snippet, not the full text")
 			assert.NotEmpty(t, m.Snippet)
 		}
-		assert.Equal(t, []int64{101, 102, 103}, ids, "non-allowlisted chat and service message dropped")
+		assert.Equal(t, []int64{101, 102, 103, 105}, ids, "non-allowlisted chat and service message dropped")
 
 		assert.Contains(t, listed.Messages[0].Snippet, "after the upgrade", "edit applied")
 		assert.NotEmpty(t, listed.Messages[0].EditedAt)
 		assert.True(t, listed.Messages[1].Mention, "@mention of the bot flagged")
 		assert.Equal(t, "document", listed.Messages[2].Media)
 		assert.Equal(t, "core.dump", listed.Messages[2].FileName)
+		assert.Equal(t, "photo", listed.Messages[3].Media)
 	})
 
 	t.Run("list_customers counts the group as unread", func(t *testing.T) {
@@ -175,9 +186,9 @@ func TestE2ESmoke(t *testing.T) {
 		callTool(ctx, t, session, "list_customers", nil, &res)
 		require.Len(t, res.Customers, 1)
 		assert.Equal(t, "acme", res.Customers[0].Customer)
-		assert.Equal(t, 3, res.Customers[0].Unread)
+		assert.Equal(t, 4, res.Customers[0].Unread)
 		require.Len(t, res.Customers[0].Groups, 1)
-		assert.Equal(t, 3, res.Customers[0].Groups[0].Unread)
+		assert.Equal(t, 4, res.Customers[0].Groups[0].Unread)
 	})
 
 	t.Run("get_thread reconstructs the conversation", func(t *testing.T) {
@@ -185,7 +196,7 @@ func TestE2ESmoke(t *testing.T) {
 		callTool(ctx, t, session, "get_thread",
 			map[string]any{"customer": "acme", "message_id": 101}, &res)
 		assert.False(t, res.Truncated)
-		require.Len(t, res.Messages, 3)
+		require.Len(t, res.Messages, 4)
 		assert.Equal(t, int64(101), res.Messages[0].MessageID)
 		assert.Contains(t, res.Messages[0].Text, "after the upgrade", "threads carry the full text")
 		assert.Equal(t, int64(101), res.Messages[1].ReplyTo)
@@ -253,7 +264,7 @@ func TestE2ESmoke(t *testing.T) {
 	t.Run("get_history returns the group chronologically", func(t *testing.T) {
 		var res e2eMessages
 		callTool(ctx, t, session, "get_history", map[string]any{"customer": "acme"}, &res)
-		require.Len(t, res.Messages, 4, "three ingested messages plus our reply")
+		require.Len(t, res.Messages, 5, "four ingested messages plus our reply")
 		for i := 1; i < len(res.Messages); i++ {
 			assert.LessOrEqual(t, res.Messages[i-1].Sent, res.Messages[i].Sent)
 		}
@@ -269,25 +280,71 @@ func TestE2ESmoke(t *testing.T) {
 		assert.Equal(t, int64(len(api.file)), file.FileSize)
 		require.NotEmpty(t, file.URL)
 		assert.True(t, strings.HasPrefix(file.URL, baseURL), "url points back at this listener: %s", file.URL)
+
+		u, err := url.Parse(file.URL)
+		require.NoError(t, err)
+		exp, err := strconv.ParseInt(u.Query().Get("exp"), 10, 64)
+		require.NoError(t, err)
+		assert.InDelta(t, exp, time.Now().Add(e2eLinkTTL).Unix(), 60,
+			"the configured link ttl reaches the server, not the built-in default")
 	})
 
 	t.Run("the download url serves the cached file", func(t *testing.T) {
-		body, status := fetch(ctx, t, file.URL, e2eAuthToken)
-		require.Equal(t, http.StatusOK, status)
-		assert.Equal(t, api.file, body)
+		resp := fetch(ctx, t, file.URL, e2eAuthToken)
+		require.Equal(t, http.StatusOK, resp.status)
+		assert.Equal(t, api.file, resp.body)
 	})
 
-	t.Run("the download url needs the token", func(t *testing.T) {
-		_, status := fetch(ctx, t, file.URL, "")
-		assert.Equal(t, http.StatusUnauthorized, status)
+	t.Run("the download url carries its own credential", func(t *testing.T) {
+		resp := fetch(ctx, t, file.URL, "")
+		require.Equal(t, http.StatusOK, resp.status, "the signature in the url stands in for the token")
+		assert.Equal(t, api.file, resp.body)
+		assert.Equal(t, "attachment", resp.header.Get("Content-Disposition"))
+	})
+
+	t.Run("a tampered signature is rejected", func(t *testing.T) {
+		resp := fetch(ctx, t, mangleSig(t, file.URL), "")
+		assert.Equal(t, http.StatusUnauthorized, resp.status)
+		assert.NotEqual(t, api.file, resp.body)
+	})
+
+	t.Run("get_thread inlines the images of the conversation", func(t *testing.T) {
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "get_thread",
+			Arguments: map[string]any{"customer": "acme", "message_id": 101}})
+		require.NoError(t, err)
+		require.False(t, res.IsError, "get_thread failed: %s", contentText(res))
+
+		var images []*mcp.ImageContent
+		for _, c := range res.Content {
+			if img, ok := c.(*mcp.ImageContent); ok {
+				images = append(images, img)
+			}
+		}
+		require.Len(t, images, 1, "the photo of message 105 rides along with the thread")
+		assert.Equal(t, api.image, images[0].Data)
+		assert.Equal(t, "image/jpeg", images[0].MIMEType)
+
+		// the flag is the only link between a flat image block and the message it came from, so
+		// it has to survive the wire, not just the go struct
+		data, err := json.Marshal(res.StructuredContent)
+		require.NoError(t, err)
+		var thread e2eMessages
+		require.NoError(t, json.Unmarshal(data, &thread))
+		var flagged []int64
+		for _, m := range thread.Messages {
+			if m.Inlined {
+				flagged = append(flagged, m.MessageID)
+			}
+		}
+		assert.Equal(t, []int64{105}, flagged, "the blocks pair with the flagged messages by order")
 	})
 
 	t.Run("mark_handled clears the triage cursor", func(t *testing.T) {
 		var marked e2eMarkHandled
 		callTool(ctx, t, session, "mark_handled",
-			map[string]any{"customer": "acme", "message_id": 103}, &marked)
+			map[string]any{"customer": "acme", "message_id": 105}, &marked)
 		assert.Equal(t, "acme", marked.Customer)
-		assert.Equal(t, int64(103), marked.MarkedUpTo)
+		assert.Equal(t, int64(105), marked.MarkedUpTo)
 
 		var res e2eMessages
 		callTool(ctx, t, session, "list_new", nil, &res)
@@ -338,9 +395,17 @@ func contentText(res *mcp.CallToolResult) string {
 	return sb.String()
 }
 
-func fetch(ctx context.Context, t *testing.T, url, token string) ([]byte, int) {
+type e2eResponse struct {
+	status int
+	body   []byte
+	header http.Header
+}
+
+// fetch gets a url off the listener, sending the bearer token only when one is given: an empty
+// token is how the signed-link path is exercised the way a harness would reach it.
+func fetch(ctx context.Context, t *testing.T, target, token string) e2eResponse {
 	t.Helper()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, http.NoBody)
 	require.NoError(t, err)
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -351,7 +416,25 @@ func fetch(ctx context.Context, t *testing.T, url, token string) ([]byte, int) {
 
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	return body, resp.StatusCode
+	return e2eResponse{status: resp.StatusCode, body: body, header: resp.Header}
+}
+
+// mangleSig flips one character of the signature, leaving the rest of the url intact.
+func mangleSig(t *testing.T, raw string) string {
+	t.Helper()
+	u, err := url.Parse(raw)
+	require.NoError(t, err)
+	q := u.Query()
+	sig := q.Get("sig")
+	require.NotEmpty(t, sig)
+
+	flipped := "0"
+	if strings.HasPrefix(sig, "0") {
+		flipped = "1"
+	}
+	q.Set("sig", flipped+sig[1:])
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func e2eBearerClient(token string) *http.Client {
@@ -367,11 +450,13 @@ func (t e2eBearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 // fakeAPI is a scripted Bot API server: getUpdates hands out one batch and then idles, getFile and
-// the download route serve a single attachment, and sendMessage records what the app posted.
+// the download route answer per file id, and sendMessage records what the app posted.
 type fakeAPI struct {
 	*httptest.Server
 	updates []scriptedUpdate
-	file    []byte
+	file    []byte // the binary attachment of message 103
+	image   []byte // the photo of message 105
+	files   map[string][]byte
 
 	mu     sync.Mutex
 	sent   []map[string]any
@@ -391,15 +476,21 @@ func (a *fakeAPI) sentMessages() []map[string]any {
 
 func startFakeAPI(t *testing.T) *fakeAPI {
 	t.Helper()
-	api := &fakeAPI{updates: scriptedBatch(), file: binaryAttachment(), nextID: 900}
+	api := &fakeAPI{updates: scriptedBatch(), file: binaryAttachment(), image: imageAttachment(), nextID: 900}
+	api.files = map[string][]byte{e2eDumpFileID: api.file, e2eImageFileID: api.image}
 	api.Server = httptest.NewServer(http.HandlerFunc(api.serve))
 	t.Cleanup(api.Close)
 	return api
 }
 
 func (a *fakeAPI) serve(w http.ResponseWriter, r *http.Request) {
-	if strings.HasPrefix(r.URL.Path, "/file/bot"+e2eBotToken+"/") {
-		_, _ = w.Write(a.file)
+	if path, ok := strings.CutPrefix(r.URL.Path, "/file/bot"+e2eBotToken+"/"+e2eFileDir); ok {
+		data, known := a.files[path]
+		if !known {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write(data)
 		return
 	}
 
@@ -412,8 +503,7 @@ func (a *fakeAPI) serve(w http.ResponseWriter, r *http.Request) {
 	case "getUpdates":
 		a.serveUpdates(w, r)
 	case "getFile":
-		_, _ = fmt.Fprintf(w, `{"ok":true,"result":{"file_id":"doc-1","file_unique_id":"uniq-1",`+
-			`"file_size":%d,"file_path":%q}}`, len(a.file), e2eFilePath)
+		a.serveGetFile(w, r)
 	case "sendMessage":
 		a.serveSend(w, r)
 	default:
@@ -444,6 +534,24 @@ func (a *fakeAPI) serveUpdates(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_, _ = fmt.Fprintf(w, `{"ok":true,"result":[%s]}`, strings.Join(pending, ","))
+}
+
+// serveGetFile answers for the file id that was asked for: with more than one attachment in the
+// batch a single hardcoded payload would hand the wrong bytes to whichever one asked second.
+func (a *fakeAPI) serveGetFile(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		FileID string `json:"file_id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	data, ok := a.files[req.FileID]
+	if !ok {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"ok":false,"error_code":400,"description":"Bad Request: file not found"}`)
+		return
+	}
+	_, _ = fmt.Fprintf(w, `{"ok":true,"result":{"file_id":%q,"file_unique_id":%q,"file_size":%d,"file_path":%q}}`,
+		req.FileID, "uniq-"+req.FileID, len(data), e2eFileDir+req.FileID)
 }
 
 func (a *fakeAPI) serveSend(w http.ResponseWriter, r *http.Request) {
@@ -507,9 +615,9 @@ func scriptedBatch() []scriptedUpdate {
 		{id: 4, body: fmt.Sprintf(
 			`{"update_id":4,"message":{"message_id":103,"from":%s,"chat":%s,"date":%d,
 			  "caption":"here is the dump",
-			  "document":{"file_id":"doc-1","file_unique_id":"uniq-1","file_name":"core.dump",
+			  "document":{"file_id":%q,"file_unique_id":"uniq-1","file_name":"core.dump",
 			    "mime_type":"application/octet-stream","file_size":%d}}}`,
-			jane, chat, now+2, len(binaryAttachment()))},
+			jane, chat, now+2, e2eDumpFileID, len(binaryAttachment()))},
 		{id: 5, body: fmt.Sprintf(
 			`{"update_id":5,"message":{"message_id":104,"from":%s,"chat":%s,"date":%d,
 			  "new_chat_title":"Acme Support (EU)"}}`, jane, chat, now+3)},
@@ -517,6 +625,13 @@ func scriptedBatch() []scriptedUpdate {
 			`{"update_id":6,"edited_message":{"message_id":101,"from":%s,"chat":%s,"date":%d,"edit_date":%d,
 			  "text":"the agent stopped talking to the server after the upgrade"}}`,
 			jane, chat, now, now+4)},
+		{id: 7, body: fmt.Sprintf(
+			`{"update_id":7,"message":{"message_id":105,"from":%s,"chat":%s,"date":%d,
+			  "reply_to_message":{"message_id":101,"from":%s,"chat":%s,"date":%d},
+			  "caption":"and here is the console",
+			  "photo":[{"file_id":"photo-1-thumb","file_unique_id":"uniq-2-t","width":90,"height":60,"file_size":90},
+			    {"file_id":%q,"file_unique_id":"uniq-2","width":800,"height":600,"file_size":%d}]}}`,
+			jane, chat, now+5, jane, chat, now, e2eImageFileID, len(imageAttachment()))},
 	}
 }
 
@@ -525,4 +640,11 @@ func scriptedBatch() []scriptedUpdate {
 func binaryAttachment() []byte {
 	data := bytes.Repeat([]byte{0x00, 0xff, 0x10, 0x80}, 512)
 	return append([]byte("\x7fELF"), data...)
+}
+
+// imageAttachment stands in for the photo of message 105. Telegram names a photo after its unique
+// id with a .jpg extension, so the bytes only have to be distinguishable from the dump.
+func imageAttachment() []byte {
+	data := bytes.Repeat([]byte{0x11, 0x22, 0x33, 0x44}, 64)
+	return append([]byte("\xff\xd8\xff\xe0"), data...)
 }
