@@ -93,6 +93,9 @@ type record struct {
 // is retried with exponential backoff.
 func (s *Service) Run(ctx context.Context) error {
 	if err := s.api.DeleteWebhook(ctx); err != nil {
+		if stopped(ctx) { // shutdown landed inside the call, not a webhook problem
+			return nil
+		}
 		return fmt.Errorf("delete webhook: %w", err)
 	}
 	slog.Info("ingest started", "poll_timeout", s.pollTimeout, "chats", len(s.chats.All()),

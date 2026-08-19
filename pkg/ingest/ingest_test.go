@@ -448,6 +448,20 @@ func TestServiceDeleteWebhookFails(t *testing.T) {
 	assert.Empty(t, api.GetUpdatesCalls())
 }
 
+func TestServiceDeleteWebhookCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	api := &mocks.BotAPI{
+		DeleteWebhookFunc: func(callCtx context.Context) error {
+			cancel()
+			return callCtx.Err()
+		},
+	}
+	st, _ := collectingStore()
+
+	require.NoError(t, newService(t, api, st).Run(ctx))
+	assert.Empty(t, api.GetUpdatesCalls())
+}
+
 func TestServicePollBackoffAndShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
