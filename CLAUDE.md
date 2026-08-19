@@ -79,6 +79,24 @@ These are decisions, not accidents — changing one needs a reason.
   one) and the tool call reads it back from `CallToolRequest.Extra.Header`: no shared state, so a
   concurrent call on another hostname cannot repoint the links of this one, and a download curl'd
   off the listener never touches them.
+- **attachments are stored flat and content-addressed** at `files/<hex(file_unique_id)>`, never
+  under their telegram name. The id keys *bytes*, not names: with a directory per id, a file
+  resent under a second name put two entries in one slot and left `Cached` picking by `ReadDir`
+  order. Hex is not cosmetic either — it keeps the key injective under case folding, which a
+  readable base64url key is not on APFS, where `AgADuQ` and `agaduq` would share a slot and serve
+  each other's bytes. Lookup is an exact `os.Lstat` plus `IsRegular` (Lstat, so a planted symlink
+  is a miss, not an escape), so traversal is unrepresentable rather than checked and no name
+  sanitizing exists. Half-written downloads land in `files/.tmp` and are renamed into place, so
+  everything directly in `files/` is a complete attachment and a later sweep needs no prefix rule;
+  orphaned temps are deliberately not cleaned up. The name `get_file` reports comes from the
+  message row (`FileName`, falling back to `FileUniqueID` — not telegram's `FilePath`, which would
+  be cache-dependent), and `/files/` deliberately sends a bare `Content-Disposition: attachment`
+  with no `filename=`: the consumer is a harness that already has the name from every listing tool,
+  while looking one up by `file_unique_id` would be ambiguous (many messages, one id) and could
+  hand one customer another's filename. `ServeContent` gets that same empty name, so the response
+  `Content-Type` is sniffed rather than extension-derived — accepted, because `attachment` plus
+  `nosniff` means the bytes are saved either way and the type the harness reads is
+  `fileResult.MimeType`, still derived from `msg.FileName`.
 - **`get_history` pages backwards on an opaque cursor**, `sent` plus the surrogate row id, not on
   `to` alone: telegram stamps whole seconds, so a page boundary inside one second would return the
   same rows forever. The token carries no chat id.

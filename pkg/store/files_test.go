@@ -5,58 +5,47 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestStore_CachePath(t *testing.T) {
+func TestFileKey(t *testing.T) {
 	tests := []struct {
-		name     string
-		uniqueID string
-		file     string
-		want     string
+		name string
+		id   string
+		want string
 	}{
-		{name: "plain", uniqueID: "AgADuQ", file: "server.log", want: "AgADuQ/server.log"},
-		{name: "path separators stripped", uniqueID: "a/b", file: "../../etc/passwd", want: "a_b/_.._etc_passwd"},
-		{name: "backslashes stripped", uniqueID: "x", file: `c:\tmp\a.txt`, want: `x/c:_tmp_a.txt`},
-		{name: "empty name", uniqueID: "x", file: "", want: "x/file"},
-		{name: "dot name", uniqueID: "x", file: ".", want: "x/file"},
-		{name: "empty unique id", uniqueID: "", file: "a.txt", want: "file/a.txt"},
-		{name: "padded traversal", uniqueID: " ..", file: " ..", want: "file/file"},
-		{name: "tab padded traversal", uniqueID: "\t..", file: "a.txt", want: "file/a.txt"},
-		{name: "dotted traversal", uniqueID: ". ..", file: "a.txt", want: "file/a.txt"},
+		{name: "base64url id", id: "AgADuQ", want: "416741447551"},
+		{name: "separators are not expressible", id: "a/b", want: "612f62"},
+		{name: "empty", id: "", want: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := testStore(t)
-			got, err := s.CachePath(tt.uniqueID, tt.file)
-			require.NoError(t, err)
-			assert.Equal(t, filepath.Join(s.Dir(), filesDir, filepath.FromSlash(tt.want)), got)
-
-			info, err := os.Stat(filepath.Dir(got))
-			require.NoError(t, err, "cache directory must be created")
-			assert.True(t, info.IsDir())
+			assert.Equal(t, tt.want, fileKey(tt.id))
 		})
 	}
 
-	t.Run("undreadable cache root", func(t *testing.T) {
-		s := testStore(t)
-		require.NoError(t, os.MkdirAll(filepath.Join(s.Dir(), filesDir), 0o750))
-		writeFile(t, filepath.Join(s.Dir(), filesDir, "uid"), "not a dir")
+	// the invariant the flat layout rests on, checked on every filesystem: APFS folds case, so a
+	// readable key would let two ids share one slot.
+	assert.False(t, strings.EqualFold(fileKey("Ab"), fileKey("aB")))
+}
 
-		_, err := s.CachePath("uid", "a.txt")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "create cache dir")
-	})
+func TestStore_CachePath(t *testing.T) {
+	s := testStore(t)
+	assert.Equal(t, filepath.Join(s.Dir(), filesDir, "416741447551"), s.cachePath("AgADuQ"),
+		"one path element under files/, encoding covered by TestFileKey")
+
+	_, err := os.Stat(filepath.Join(s.Dir(), filesDir))
+	assert.True(t, os.IsNotExist(err), "cachePath is pure — SaveFile creates the directory")
 }
 
 func TestStore_Cached(t *testing.T) {
 	t.Run("hit", func(t *testing.T) {
 		s := testStore(t)
-		path, err := s.CachePath("uid", "server.log")
-		require.NoError(t, err)
+		path := s.cachePath("uid")
 		writeFile(t, path, "payload")
 
 		got, ok := s.Cached("uid")
@@ -70,43 +59,66 @@ func TestStore_Cached(t *testing.T) {
 		assert.False(t, ok)
 	})
 
-	t.Run("miss on empty directory", func(t *testing.T) {
+	t.Run("miss on empty cache directory", func(t *testing.T) {
 		s := testStore(t)
-		_, err := s.CachePath("uid", "server.log")
-		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(filepath.Join(s.Dir(), filesDir), 0o750))
 
 		_, ok := s.Cached("uid")
-		assert.False(t, ok, "a created but unpopulated directory is not a cache hit")
+		assert.False(t, ok, "a created but unpopulated cache directory is not a cache hit")
 	})
 
-	t.Run("skips subdirectories", func(t *testing.T) {
+	t.Run("miss on empty id", func(t *testing.T) {
 		s := testStore(t)
-		path, err := s.CachePath("uid", "server.log")
-		require.NoError(t, err)
-		require.NoError(t, os.MkdirAll(filepath.Join(filepath.Dir(path), "aaa-subdir"), 0o750))
-		writeFile(t, path, "payload")
-
-		got, ok := s.Cached("uid")
-		assert.True(t, ok)
-		assert.Equal(t, path, got)
+		_, ok := s.Cached("")
+		assert.False(t, ok)
 	})
 
-	t.Run("traversal id cannot escape the cache", func(t *testing.T) {
+	t.Run("leftover directory from the old layout is a miss", func(t *testing.T) {
+		s := testStore(t)
+		path := s.cachePath("uid")
+		require.NoError(t, os.MkdirAll(path, 0o750))
+		writeFile(t, filepath.Join(path, "server.log"), "payload")
+
+		_, ok := s.Cached("uid")
+		assert.False(t, ok, "a directory where the bytes are expected must be a miss, not an error")
+
+		_, err := s.SaveFile("uid", func(io.Writer) error { return nil })
+		require.Error(t, err, "the re-download reports the blocked slot instead of looping forever")
+		assert.Contains(t, err.Error(), `cache "uid"`)
+	})
+
+	t.Run("symlink at the key path is a miss", func(t *testing.T) {
+		s := testStore(t)
+		secret := filepath.Join(s.Dir(), "tg-mcp.db")
+		writeFile(t, secret, "database")
+		require.NoError(t, os.MkdirAll(filepath.Join(s.Dir(), filesDir), 0o750))
+		require.NoError(t, os.Symlink(secret, s.cachePath("uid")))
+
+		_, ok := s.Cached("uid")
+		assert.False(t, ok, "Lstat, not Stat: a planted symlink must not serve what it points at")
+
+		require.NoError(t, os.Symlink(filepath.Join(s.Dir(), "gone"), s.cachePath("dangling")))
+		_, ok = s.Cached("dangling")
+		assert.False(t, ok)
+	})
+
+	t.Run("no id addresses a file outside its own slot", func(t *testing.T) {
 		s := testStore(t)
 		writeFile(t, filepath.Join(s.Dir(), "tg-mcp.db"), "database")
 		require.NoError(t, os.MkdirAll(filepath.Join(s.Dir(), filesDir), 0o750))
 		writeFile(t, filepath.Join(s.Dir(), filesDir, "loose.bin"), "payload")
 
-		for _, id := range []string{"..", " ..", "\t..", ".", " . ", "../..", "/.."} {
+		// the first two address the planted regular files under any identity-like key, the rest
+		// are the traversal shapes the old sanitize rule had to strip
+		for _, id := range []string{"loose.bin", "../tg-mcp.db", "..", " ..", "\t..", ".", " . ", "../..", "/.."} {
 			_, ok := s.Cached(id)
-			assert.False(t, ok, "id %q must not resolve outside its own cache directory", id)
+			assert.False(t, ok, "id %q must not resolve outside its own cache entry", id)
 		}
 	})
 
-	t.Run("sanitized id matches the one used for writing", func(t *testing.T) {
+	t.Run("the id used for writing is the one that reads back", func(t *testing.T) {
 		s := testStore(t)
-		path, err := s.CachePath("a/b", "x.bin")
-		require.NoError(t, err)
+		path := s.cachePath("a/b")
 		writeFile(t, path, "payload")
 
 		got, ok := s.Cached("a/b")
@@ -115,10 +127,34 @@ func TestStore_Cached(t *testing.T) {
 	})
 }
 
+// TestStore_CachedCaseFold reproduces only on a case-insensitive filesystem such as APFS:
+// file_unique_id is case-significant base64url, so ids differing only in case must not share
+// cached bytes. It compares bytes rather than paths — filepath.Join is pure string work, so a
+// path comparison agrees on every filesystem.
+func TestStore_CachedCaseFold(t *testing.T) {
+	s := testStore(t)
+	for _, id := range []string{"Ab", "aB"} {
+		_, err := s.SaveFile(id, func(w io.Writer) error {
+			_, _ = io.WriteString(w, "payload-"+id)
+			return nil
+		})
+		require.NoError(t, err)
+	}
+
+	for _, id := range []string{"Ab", "aB"} {
+		path, ok := s.Cached(id)
+		require.True(t, ok, "id %q must be cached", id)
+
+		data, err := os.ReadFile(path) //nolint:gosec // test path
+		require.NoError(t, err)
+		assert.Equal(t, "payload-"+id, string(data), "id %q served the wrong bytes", id)
+	}
+}
+
 func TestStore_SaveFile(t *testing.T) {
 	t.Run("written and readable through Cached", func(t *testing.T) {
 		s := testStore(t)
-		path, err := s.SaveFile("uid", "server.log", func(w io.Writer) error {
+		path, err := s.SaveFile("uid", func(w io.Writer) error {
 			_, _ = io.WriteString(w, "payload")
 			return nil
 		})
@@ -131,11 +167,15 @@ func TestStore_SaveFile(t *testing.T) {
 		data, err := os.ReadFile(path) //nolint:gosec // test path
 		require.NoError(t, err)
 		assert.Equal(t, "payload", string(data))
+
+		entries, err := os.ReadDir(filepath.Join(s.Dir(), filesDir, tempDir))
+		require.NoError(t, err)
+		assert.Empty(t, entries, "a completed download leaves no temp file behind")
 	})
 
 	t.Run("failed write leaves no cache hit", func(t *testing.T) {
 		s := testStore(t)
-		_, err := s.SaveFile("uid", "server.log", func(w io.Writer) error {
+		_, err := s.SaveFile("uid", func(w io.Writer) error {
 			_, _ = io.WriteString(w, "half of the")
 			return errors.New("connection reset")
 		})
@@ -144,7 +184,7 @@ func TestStore_SaveFile(t *testing.T) {
 		_, ok := s.Cached("uid")
 		assert.False(t, ok, "a truncated download must never be served as the cached file")
 
-		entries, err := os.ReadDir(filepath.Join(s.Dir(), filesDir, "uid"))
+		entries, err := os.ReadDir(filepath.Join(s.Dir(), filesDir, tempDir))
 		require.NoError(t, err)
 		assert.Empty(t, entries, "the temp file is cleaned up")
 	})
@@ -152,7 +192,7 @@ func TestStore_SaveFile(t *testing.T) {
 	t.Run("overwrites an earlier copy", func(t *testing.T) {
 		s := testStore(t)
 		for _, content := range []string{"first", "second"} {
-			_, err := s.SaveFile("uid", "server.log", func(w io.Writer) error {
+			_, err := s.SaveFile("uid", func(w io.Writer) error {
 				_, _ = io.WriteString(w, content)
 				return nil
 			})
@@ -166,17 +206,35 @@ func TestStore_SaveFile(t *testing.T) {
 		assert.Equal(t, "second", string(data))
 	})
 
-	t.Run("unusable cache directory", func(t *testing.T) {
+	t.Run("empty file id", func(t *testing.T) {
+		s := testStore(t)
+		_, err := s.SaveFile("", func(io.Writer) error { return nil })
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty file id")
+	})
+
+	t.Run("unusable cache root", func(t *testing.T) {
+		s := testStore(t)
+		writeFile(t, filepath.Join(s.Dir(), filesDir), "not a dir")
+
+		_, err := s.SaveFile("uid", func(io.Writer) error { return nil })
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "create temp dir")
+	})
+
+	t.Run("unusable temp directory", func(t *testing.T) {
 		s := testStore(t)
 		require.NoError(t, os.MkdirAll(filepath.Join(s.Dir(), filesDir), 0o750))
-		writeFile(t, filepath.Join(s.Dir(), filesDir, "uid"), "not a dir")
+		writeFile(t, filepath.Join(s.Dir(), filesDir, tempDir), "not a dir")
 
-		_, err := s.SaveFile("uid", "a.txt", func(io.Writer) error { return nil })
+		_, err := s.SaveFile("uid", func(io.Writer) error { return nil })
 		require.Error(t, err)
+		assert.Contains(t, err.Error(), "create temp dir")
 	})
 }
 
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 }

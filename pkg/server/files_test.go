@@ -233,10 +233,18 @@ func TestToolsGetFile(t *testing.T) {
 }
 
 func TestServeFile(t *testing.T) {
-	s := fileServer(t, fakeAPI(map[string][]byte{"f2": []byte("nxagentd: connection refused\n")}))
-	_, out, err := s.getFile(context.Background(), nil, getFileParams{Customer: "acme", MessageID: 2})
+	ctx := context.Background()
+	svgData := []byte(`<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>`)
+	s := fileServer(t, fakeAPI(map[string][]byte{"f2": []byte("nxagentd: connection refused\n"), "f11": svgData}))
+	_, out, err := s.getFile(ctx, nil, getFileParams{Customer: "acme", MessageID: 2})
 	require.NoError(t, err)
 	require.True(t, out.Inline)
+
+	require.NoError(t, s.store.UpsertMessage(ctx, store.Message{
+		ChatID: -1001, MessageID: 11, Sent: seedBase().Add(6 * time.Minute), SenderName: "alice", Text: "diagram",
+		MediaType: "document", FileID: "f11", FileUniqueID: "u11", FileName: "diagram.svg"}))
+	_, _, err = s.getFile(ctx, nil, getFileParams{Customer: "acme", MessageID: 11})
+	require.NoError(t, err)
 
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
@@ -261,7 +269,23 @@ func TestServeFile(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 		assert.Equal(t, "nxagentd: connection refused\n", string(body))
-		assert.Contains(t, resp.Header.Get("Content-Disposition"), `filename="server.log"`)
+		assert.Equal(t, "attachment", resp.Header.Get("Content-Disposition"),
+			"no filename= — the consumer gets the name from get_file")
+		assert.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"),
+			"customer bytes must never be sniffed into an active type on this origin")
+	})
+
+	t.Run("content type is sniffed, not derived from the name", func(t *testing.T) {
+		resp := get(t, "/files/u11", testToken)
+		defer resp.Body.Close()
+
+		// ServeContent gets no name, so an .svg is typed by its bytes: accepted, since
+		// attachment plus nosniff means it is saved either way and get_file reports the
+		// name-derived type the harness actually reads
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "text/xml; charset=utf-8", resp.Header.Get("Content-Type"))
+		assert.Equal(t, "attachment", resp.Header.Get("Content-Disposition"))
+		assert.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
 	})
 
 	t.Run("unknown id", func(t *testing.T) {
@@ -431,7 +455,8 @@ func TestFileNameFallback(t *testing.T) {
 	tg := fakeAPI(map[string][]byte{"f1": pngData})
 	s := fileServer(t, tg)
 
-	// a message logged without a file name falls back to the name the api server reports
+	// a message logged without a file name falls back to its unique id: telegram's file path is
+	// only known on a cache miss, so reporting it would make the name cache-dependent
 	require.NoError(t, s.store.UpsertMessage(context.Background(), store.Message{
 		ChatID: -1001, MessageID: 7, Sent: seedBase(), SenderName: "alice", Text: "shot",
 		MediaType: "photo", FileID: "f1", FileUniqueID: "u7",
@@ -439,6 +464,33 @@ func TestFileNameFallback(t *testing.T) {
 
 	_, out, err := s.getFile(context.Background(), nil, getFileParams{Customer: "acme", MessageID: 7})
 	require.NoError(t, err)
-	assert.Equal(t, "f1", out.FileName, "telegram file path is the last resort")
+	assert.Equal(t, "u7", out.FileName, "the unique id is the last resort")
 	assert.True(t, strings.HasPrefix(out.MimeType, "image/"), "the type is sniffed when the name has no extension")
+}
+
+// TestFileNamePerMessage is the regression for the layout this cache replaced: file_unique_id
+// keys bytes, not names, so the same file resent under a second name used to leave two files in
+// one directory and let ReadDir order decide which name get_file reported.
+func TestFileNamePerMessage(t *testing.T) {
+	ctx := context.Background()
+	tg := fakeAPI(map[string][]byte{"f1": pngData})
+	s := fileServer(t, tg)
+
+	for _, m := range []store.Message{
+		{ChatID: -1001, MessageID: 8, Sent: seedBase(), SenderName: "alice", Text: "shot",
+			MediaType: "photo", FileID: "f1", FileUniqueID: "ur", FileName: "first.png"},
+		{ChatID: -1001, MessageID: 9, Sent: seedBase().Add(time.Minute), SenderName: "bob", Text: "same shot",
+			MediaType: "photo", FileID: "f1", FileUniqueID: "ur", FileName: "second.png"},
+	} {
+		require.NoError(t, s.store.UpsertMessage(ctx, m))
+	}
+
+	_, first, err := s.getFile(ctx, nil, getFileParams{Customer: "acme", MessageID: 8})
+	require.NoError(t, err)
+	assert.Equal(t, "first.png", first.FileName)
+
+	_, second, err := s.getFile(ctx, nil, getFileParams{Customer: "acme", MessageID: 9})
+	require.NoError(t, err)
+	assert.Equal(t, "second.png", second.FileName, "each message reports the name it carries")
+	assert.Len(t, tg.GetFileCalls(), 1, "one id is one cache entry, whatever it was named")
 }

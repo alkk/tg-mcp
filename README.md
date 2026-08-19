@@ -285,9 +285,18 @@ Claude Desktop has no native HTTP transport, so bridge it through `mcp-remote` i
 ```
 
 Attachments served as urls are plain authenticated GETs:
-`curl -H "Authorization: Bearer <auth-token>" https://<host>/files/<id> -O`.
+`curl -H "Authorization: Bearer <auth-token>" https://<host>/files/<id> -O`. The response carries
+no `filename=`, so `-O` names the download after the id — the real name is `file_name` in the
+`get_file` result (and in every listing tool).
 
 ## Backups
+
+The attachment cache is content-addressed: `files/<hex(file_unique_id)>`, one file per
+attachment. Older builds stored a directory per attachment instead; those entries are invisible
+to the current code, so they are never served and never reclaimed —
+`rm -rf -- "${DATA_DIR:?set DATA_DIR}/files"` once after upgrading clears them (the data dir is
+whatever `--data`/`DATA_DIR` points at, `./data` by default). Nothing else is lost, attachments
+re-download on first access.
 
 Everything is in the data dir: `tg-mcp.db` (plus its WAL sidecars) and `files/`. There is no
 history backfill from Telegram, so a lost database is lost for good — copy the volume nightly.

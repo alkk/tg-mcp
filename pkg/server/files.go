@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -71,7 +70,7 @@ func (s *Server) getFile(ctx context.Context, req *mcp.CallToolRequest,
 
 	customer, label := s.chatNamer()(chat.ID)
 	res := fileResult{MessageID: msg.MessageID, Customer: customer, Label: label, Media: msg.MediaType,
-		FileName: filepath.Base(path), FileSize: msg.FileSize}
+		FileName: displayName(msg), FileSize: msg.FileSize}
 	if info, statErr := os.Stat(path); statErr == nil {
 		res.FileSize = info.Size()
 	}
@@ -89,6 +88,16 @@ func (s *Server) getFile(ctx context.Context, req *mcp.CallToolRequest,
 	return &mcp.CallToolResult{Content: []mcp.Content{content}}, res, nil
 }
 
+// displayName is the name an attachment is reported under. It comes off the message row, never
+// off the cache path or telegram's file path: the latter is only known on a cache miss, so it
+// would make the reported name depend on whether the file happened to be cached.
+func displayName(m store.Message) string {
+	if m.FileName != "" {
+		return m.FileName
+	}
+	return m.FileUniqueID
+}
+
 // cachedFile returns the local path of an attachment, downloading it on a cache miss.
 func (s *Server) cachedFile(ctx context.Context, m store.Message) (string, error) {
 	if path, ok := s.store.Cached(m.FileUniqueID); ok {
@@ -102,19 +111,14 @@ func (s *Server) cachedFile(ctx context.Context, m store.Message) (string, error
 	if err != nil {
 		return "", fmt.Errorf("resolve attachment of message %d: %w", m.MessageID, err)
 	}
-	name := m.FileName
-	if name == "" {
-		name = filepath.Base(file.FilePath)
-	}
-
-	path, err := s.store.SaveFile(m.FileUniqueID, name, func(w io.Writer) error {
+	path, err := s.store.SaveFile(m.FileUniqueID, func(w io.Writer) error {
 		return s.telegram.Download(ctx, file.FilePath, w)
 	})
 	if err != nil {
 		return "", fmt.Errorf("cache attachment of message %d: %w", m.MessageID, err)
 	}
 	slog.Info("attachment cached", "chat_id", m.ChatID, "message_id", m.MessageID,
-		"media", m.MediaType, "file", name)
+		"media", m.MediaType, "file", displayName(m))
 	return path, nil
 }
 
@@ -249,10 +253,10 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	name := filepath.Base(path)
 	// customer-supplied bytes: force a download and forbid content sniffing, so an .html
-	// attachment cannot run as a page on this origin
-	w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(name))
+	// attachment cannot run as a page on this origin. No filename= — the cache path carries no
+	// name, and the consumer already has it from get_file and every listing tool.
+	w.Header().Set("Content-Disposition", "attachment")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	http.ServeContent(w, r, name, info.ModTime(), fh)
+	http.ServeContent(w, r, "", info.ModTime(), fh)
 }

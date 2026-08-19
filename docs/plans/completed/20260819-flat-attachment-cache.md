@@ -243,9 +243,9 @@ sniffs to `text/plain` and `.docx`/`.xlsx` to `application/zip` on the HTTP resp
 
 - **Cache invalidation is total,** and it degrades safely — old `files/<id>/<name>` entries are
   *directories* where the new code expects files, so the `IsRegular` check makes them a miss and a
-  re-download. `rm -rf $DATA_DIR/files/` on deploy is cleaner: it clears the dead weight and moots
-  a theoretical collision where an old readable id that happened to be all-lowercase hex equalled
-  a new key, which would make `SaveFile`'s rename fail with `EISDIR`.
+  re-download. `rm -rf -- "${DATA_DIR:?set DATA_DIR}/files"` on deploy is cleaner: it clears the
+  dead weight and moots a theoretical collision where an old readable id that happened to be
+  all-lowercase hex equalled a new key, which would make `SaveFile`'s rename fail with `EISDIR`.
 - **Orphaned temps** in `files/.tmp` are not swept at startup. They leaked before too, inside the
   attachment directory where the dot rule hid them. Decided: no sweep, no cleanup code.
 - **The cache is shared across customers by content.** Two customers sending identical bytes share
@@ -276,15 +276,16 @@ top would have mixed two changes in one commit.
 **Files:**
 - Modify: `pkg/store/files_test.go`
 
-- [ ] add `TestStore_CachedCaseFold`: write distinct content for ids `"Ab"` and `"aB"`, then
+- [x] add `TestStore_CachedCaseFold`: write distinct content for ids `"Ab"` and `"aB"`, then
       assert `Cached("Ab")` reads back the `Ab` bytes and `Cached("aB")` the `aB` bytes — compare
       **bytes**, never paths. Comment that it reproduces only on a case-insensitive filesystem.
-- [ ] write it against the *current* `CachePath(id, name)` signature; Task 3 re-points the call
+- [x] write it against the *current* `CachePath(id, name)` signature; Task 3 re-points the call
       sites when the signature changes. Note that in the test so the churn is expected.
-- [ ] run `go test ./pkg/store/ -run TestStore_CachedCaseFold -count=1` — MUST fail on this
+- [x] run `go test ./pkg/store/ -run TestStore_CachedCaseFold -count=1` — MUST fail on this
       machine; record the output as the red baseline. Expect
-      `id "Ab" served the wrong bytes — expected "payload-Ab", actual "payload-aB"`.
-- [ ] confirm nothing else regressed: `go test ./pkg/store/ -count=1` fails only on the new test
+      `id "Ab" served the wrong bytes — expected "payload-Ab", actual "payload-aB"` — matched
+      exactly.
+- [x] confirm nothing else regressed: `go test ./pkg/store/ -count=1` fails only on the new test
 
 ### Task 2: Take the display name off the path (server only)
 
@@ -296,16 +297,23 @@ this intermediate state builds, passes all six packages, passes e2e, and lints c
 **Files:**
 - Modify: `pkg/server/files.go`, `pkg/server/files_test.go`
 
-- [ ] `getFile`: `FileName: msg.FileName` falling back to `msg.FileUniqueID`, not
-      `filepath.Base(path)` and not telegram's `FilePath`
-- [ ] `serveFile`: bare `Content-Disposition: attachment`, `""` to `ServeContent`; keep `nosniff`;
+- [x] `getFile`: `FileName: msg.FileName` falling back to `msg.FileUniqueID`, not
+      `filepath.Base(path)` and not telegram's `FilePath` — extracted as `displayName(m)`, so
+      Task 3's `cachedFile` log line can reuse the same fallback
+- [x] `serveFile`: bare `Content-Disposition: attachment`, `""` to `ServeContent`; keep `nosniff`;
       drop the now-unused `strconv` import
-- [ ] update `pkg/server/files_test.go:264`: `Content-Disposition` is now bare `attachment` with
+- [x] update `pkg/server/files_test.go:264`: `Content-Disposition` is now bare `attachment` with
       no `filename=`
-- [ ] update `TestFileNameFallback` (`files_test.go:430`) to expect `"u7"`, the unique id, and
+- [x] update `TestFileNameFallback` (`files_test.go:430`) to expect `"u7"`, the unique id, and
       reword its comment away from "telegram file path is the last resort"
-- [ ] run `go build ./... && make test && make e2e && make lint` — **everything** green, including
-      `pkg/store`, which this task does not touch
+- [x] run `go build ./... && make test && make e2e && make lint` — build clean, `make lint` clean,
+      `pkg/server` green (97.7% coverage), `go test -tags=e2e ./cmd/...` green.
+      ⚠️ `make test` / `make e2e` run every package, so both still report the Task 1 red baseline
+      in `pkg/store` (`TestStore_CachedCaseFold`) — the plan's "everything green" was written
+      before that test was committed. It is the only failure; Task 3 turns it green.
+- [x] ➕ fix a `wrapcheck` violation in the Task 1 test (`io.WriteString`'s error returned
+      unwrapped), which made `make lint` fail; now `_, _ = io.WriteString(...)`, matching the
+      neighbouring subtests
 
 ### Task 3: Flip the store to the flat layout
 
@@ -320,85 +328,93 @@ writing the same two tests twice.
 - Modify: `pkg/server/files.go`, `pkg/server/server.go`
 - Modify: `pkg/server/mocks/message_store.go` (regenerated)
 
-- [ ] add `fileKey`; delete `sanitize`; unexport `CachePath` to `cachePath` and drop its `name`
+- [x] add `fileKey`; delete `sanitize`; unexport `CachePath` to `cachePath` and drop its `name`
       parameter, adding the empty-id `errors.New("empty file id")`
-- [ ] rewrite `Cached` as exact-path `os.Lstat` + `IsRegular`, with its own empty-id guard
-- [ ] drop `name` from `SaveFile`; add the `tempDir = ".tmp"` const and drop `tempPrefix`; create
+- [x] rewrite `Cached` as exact-path `os.Lstat` + `IsRegular`, with its own empty-id guard
+- [x] drop `name` from `SaveFile`; add the `tempDir = ".tmp"` const and drop `tempPrefix`; create
       `files/.tmp` with `if err = os.MkdirAll(tmpDir, 0o750); err != nil` — **`=`, not `:=`**:
       `SaveFile` has a named return `err`, and `:=` trips `govet: shadow`
       (`.golangci.yml:77-79`), which would not surface until Task 4's `make lint`
-- [ ] `os.CreateTemp(tmpDir, "part")`; keep the deferred `Close`+`Remove`
-- [ ] narrow `SaveFile` in the `messageStore` interface (`server.go:41`) and regenerate the mock
+- [x] `os.CreateTemp(tmpDir, "part")`; keep the deferred `Close`+`Remove`
+- [x] narrow `SaveFile` in the `messageStore` interface (`server.go:41`) and regenerate the mock
       with moq
-- [ ] delete the `name` derivation block in `cachedFile` (`files.go:105-108`); log the same
+- [x] delete the `name` derivation block in `cachedFile` (`files.go:105-108`); log the same
       `FileName`/`FileUniqueID` fallback `getFile` uses, so the line is not `file=""` for a row
       with no stored name
-- [ ] re-point the Task 1 test at the new signatures; it MUST now pass — that is the proof
-- [ ] add `TestFileKey` (not `Test_fileKey` — no test in the repo uses that prefix): the hex
+- [x] re-point the Task 1 test at the new signatures; it MUST now pass — that is the proof
+- [x] add `TestFileKey` (not `Test_fileKey` — no test in the repo uses that prefix): the hex
       mapping (`hex("AgADuQ") == "416741447551"`, verified) as literal expectations, plus
       `assert.False(t, strings.EqualFold(fileKey("Ab"), fileKey("aB")))` so Linux CI guards the
       invariant too. Needs a new `strings` import in the test file.
-- [ ] rewrite the `TestStore_CachePath` table to be keyed on **id alone**: every `want` becomes a
+- [x] rewrite the `TestStore_CachePath` table to be keyed on **id alone**: every `want` becomes a
       hex string (`plain`: `AgADuQ/server.log` → `416741447551`), the `backslashes stripped` /
       `empty name` / `dot name` rows all key on `"x"` and collapse into one, every *name* row goes
       (`../../etc/passwd`, `c:\tmp\a.txt`, `""`, `"."`, `".."`, `". .."`), and the
       `empty unique id` row flips from a path expectation to an error assertion
-- [ ] repoint `TestStore_CachePath/"undreadable cache root"` (`files_test.go:44-52`) — it plants a
+- [x] repoint `TestStore_CachePath/"undreadable cache root"` (`files_test.go:44-52`) — it plants a
       regular file at `files/uid`, which no longer blocks anything; plant at `$dir/files` itself
       and assert both `cachePath("uid")` and `SaveFile("uid", …)` fail with `create cache dir`.
       This is the only test covering that branch, so dropping it would regress the coverage Task 4
       checks.
-- [ ] rename `TestStore_Cached/"sanitized id matches the one used for writing"`
+- [x] rename `TestStore_Cached/"sanitized id matches the one used for writing"`
       (`files_test.go:106`) — it still passes, but the name is the reason Task 4's
       `grep -rn 'sanitize' pkg/store/` gate would fail on this plan's own output
-- [ ] fix `TestStore_SaveFile/"failed write leaves no cache hit"` (`files_test.go:147`) — it reads
+- [x] fix `TestStore_SaveFile/"failed write leaves no cache hit"` (`files_test.go:147`) — it reads
       `files/uid`, which no longer exists; assert instead that `Cached` misses and `files/.tmp`
       holds no leftover
-- [ ] replace `TestStore_SaveFile/"unusable cache directory"` (`files_test.go:169`), which plants
+- [x] replace `TestStore_SaveFile/"unusable cache directory"` (`files_test.go:169`), which plants
       `files/uid` and now succeeds silently, with the new failure branch: plant a regular file at
       `files/.tmp` and assert `create temp dir` errors
-- [ ] delete `TestStore_Cached/"skips subdirectories"` — it still *passes* after the change while
+- [x] delete `TestStore_Cached/"skips subdirectories"` — it still *passes* after the change while
       testing nothing, so no test run would catch it; and reword
       `TestStore_Cached/"miss on empty directory"` (`:73`), whose comment now describes `files/`
       rather than a per-attachment directory
-- [ ] add a leftover-directory test: an old-layout directory at the new key's path is a `Cached`
+- [x] add a leftover-directory test: an old-layout directory at the new key's path is a `Cached`
       miss, not an error
-- [ ] add empty-id tests: `cachePath("")` errors, `Cached("")` is false
-- [ ] add a test that a successful `SaveFile` leaves `files/.tmp` empty
-- [ ] run `go test ./pkg/store/ ./pkg/server/ -count=1` — both packages green before Task 4
+- [x] add empty-id tests: `cachePath("")` errors, `Cached("")` is false
+- [x] add a test that a successful `SaveFile` leaves `files/.tmp` empty
+- [x] run `go test ./pkg/store/ ./pkg/server/ -count=1` — both packages green before Task 4
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented
-- [ ] verify edge cases: empty id, leftover directory at a key path, case-differing ids, a message
+- [x] verify all requirements from Overview are implemented — flat `files/<hex>` storage, exact
+      `os.Lstat`+`IsRegular` lookup, `sanitize` deleted, display name off the message row
+- [x] verify edge cases: empty id, leftover directory at a key path, case-differing ids, a message
       row with no `file_name`, a resent file that previously produced two names in one directory
-- [ ] confirm the encoding never leaked out of the store:
+- [x] ➕ the resent-file case had no test — the other four did. Added `TestFileNamePerMessage`
+      (`pkg/server/files_test.go`): two messages sharing `file_unique_id` with different
+      `file_name`, each reports its own name and only one download happens
+- [x] confirm the encoding never leaked out of the store:
       `grep -rn 'fileKey\|encoding/hex' pkg/ cmd/ --exclude-dir=store` returns nothing
-- [ ] confirm `sanitize` and `cacheName` are gone: `grep -rn 'sanitize' pkg/store/` returns
+- [x] confirm `sanitize` and `cacheName` are gone: `grep -rn 'sanitize' pkg/store/` returns
       nothing — this passes only if Task 3 renamed the `"sanitized id…"` subtest
-- [ ] run full test suite: `make test`
-- [ ] run e2e: `make e2e` — verified to pass unchanged; a failure at `:268` means the `FileName`
+- [x] run full test suite: `make test` — all packages green, 95.0% total
+- [x] run e2e: `make e2e` — verified to pass unchanged; a failure at `:268` means the `FileName`
       source is wired wrong, not that the test needs updating
-- [ ] run `make lint` and `make fmt`
-- [ ] verify coverage on `pkg/store` and `pkg/server` has not regressed
+- [x] run `make lint` (0 issues) and `make fmt` (no changes beyond the new test)
+- [x] verify coverage on `pkg/store` and `pkg/server` has not regressed — `pkg/server` 97.7%,
+      unchanged from `f13b484`; `pkg/store` 93.1% vs 93.2%, and a per-function diff against the
+      baseline shows the only moved line is `SaveFile`, 81.2% → 84.2%. The total dipped because
+      deleting `sanitize`/`CachePath` removed fully covered statements from the denominator; no
+      new uncovered branch exists.
 
 ### Task 5: [Final] Update documentation
 
 **Files:**
 - Modify: `CLAUDE.md`
 
-- [ ] add one bullet to "Design constraints": attachments are stored flat and content-addressed at
+- [x] add one bullet to "Design constraints": attachments are stored flat and content-addressed at
       `files/<hex(file_unique_id)>`, never under their telegram name — the id keys *bytes*, not
       names, so a directory-per-id layout let a resent file put two names in one slot and left
       `Cached` picking by `ReadDir` order; hex also keeps the key injective under case folding,
       which a readable base64url key is not on APFS
-- [ ] note in the same bullet that the download name comes from the message row, and that
+- [x] note in the same bullet that the download name comes from the message row, and that
       `/files/` deliberately sends no `filename=`: the consumer is a harness that already has the
       name from every listing tool, and a name lookup by `file_unique_id` would be ambiguous
       (many messages, one id) and could cross customers
-- [ ] `README.md:288` documents `curl … /files/<id> -O`, which now writes a file named after the
+- [x] `README.md:288` documents `curl … /files/<id> -O`, which now writes a file named after the
       id; add a clause pointing at `file_name` in the `get_file` result
-- [ ] move this plan to `docs/plans/completed/`
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 
@@ -406,8 +422,9 @@ writing the same two tests twice.
 
 **Manual verification:**
 
-- `rm -rf $DATA_DIR/files/` on deploy — the layout changed completely, nothing under the old one
-  is readable by the new code, and clearing it avoids a re-download racing a stale directory
+- `rm -rf -- "${DATA_DIR:?set DATA_DIR}/files"` on deploy — the layout changed completely,
+  nothing under the old one is readable by the new code, and clearing it avoids a re-download
+  racing a stale directory
 - expect a one-off burst of `attachment cached` log lines as previously cached attachments are
   re-fetched; confirm it does not recur on a second `get_file` for the same message
 

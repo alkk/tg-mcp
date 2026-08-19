@@ -38,7 +38,7 @@ type messageStore interface {
 	UpsertMessage(ctx context.Context, m store.Message) error
 	UnreadCounts(ctx context.Context, chatIDs []int64) (map[int64]int, error)
 	SetCursor(ctx context.Context, chatID, messageID int64) (int64, error)
-	SaveFile(fileUniqueID, name string, write func(w io.Writer) error) (string, error)
+	SaveFile(fileUniqueID string, write func(w io.Writer) error) (string, error)
 	Cached(fileUniqueID string) (path string, ok bool)
 }
 

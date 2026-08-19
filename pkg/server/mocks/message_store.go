@@ -30,7 +30,7 @@ import (
 //			MessageByIDFunc: func(ctx context.Context, chatID int64, messageID int64) (store.Message, error) {
 //				panic("mock out the MessageByID method")
 //			},
-//			SaveFileFunc: func(fileUniqueID string, name string, write func(w io.Writer) error) (string, error) {
+//			SaveFileFunc: func(fileUniqueID string, write func(w io.Writer) error) (string, error) {
 //				panic("mock out the SaveFile method")
 //			},
 //			SearchFunc: func(ctx context.Context, query string, chatIDs []int64, from time.Time, to time.Time, limit int) ([]store.SearchHit, error) {
@@ -68,7 +68,7 @@ type MessageStore struct {
 	MessageByIDFunc func(ctx context.Context, chatID int64, messageID int64) (store.Message, error)
 
 	// SaveFileFunc mocks the SaveFile method.
-	SaveFileFunc func(fileUniqueID string, name string, write func(w io.Writer) error) (string, error)
+	SaveFileFunc func(fileUniqueID string, write func(w io.Writer) error) (string, error)
 
 	// SearchFunc mocks the Search method.
 	SearchFunc func(ctx context.Context, query string, chatIDs []int64, from time.Time, to time.Time, limit int) ([]store.SearchHit, error)
@@ -129,8 +129,6 @@ type MessageStore struct {
 		SaveFile []struct {
 			// FileUniqueID is the fileUniqueID argument value.
 			FileUniqueID string
-			// Name is the name argument value.
-			Name string
 			// Write is the write argument value.
 			Write func(w io.Writer) error
 		}
@@ -359,23 +357,21 @@ func (mock *MessageStore) MessageByIDCalls() []struct {
 }
 
 // SaveFile calls SaveFileFunc.
-func (mock *MessageStore) SaveFile(fileUniqueID string, name string, write func(w io.Writer) error) (string, error) {
+func (mock *MessageStore) SaveFile(fileUniqueID string, write func(w io.Writer) error) (string, error) {
 	if mock.SaveFileFunc == nil {
 		panic("MessageStore.SaveFileFunc: method is nil but messageStore.SaveFile was just called")
 	}
 	callInfo := struct {
 		FileUniqueID string
-		Name         string
 		Write        func(w io.Writer) error
 	}{
 		FileUniqueID: fileUniqueID,
-		Name:         name,
 		Write:        write,
 	}
 	mock.lockSaveFile.Lock()
 	mock.calls.SaveFile = append(mock.calls.SaveFile, callInfo)
 	mock.lockSaveFile.Unlock()
-	return mock.SaveFileFunc(fileUniqueID, name, write)
+	return mock.SaveFileFunc(fileUniqueID, write)
 }
 
 // SaveFileCalls gets all the calls that were made to SaveFile.
@@ -384,12 +380,10 @@ func (mock *MessageStore) SaveFile(fileUniqueID string, name string, write func(
 //	len(mockedmessageStore.SaveFileCalls())
 func (mock *MessageStore) SaveFileCalls() []struct {
 	FileUniqueID string
-	Name         string
 	Write        func(w io.Writer) error
 } {
 	var calls []struct {
 		FileUniqueID string
-		Name         string
 		Write        func(w io.Writer) error
 	}
 	mock.lockSaveFile.RLock()
