@@ -194,7 +194,37 @@ func requestBase(r *http.Request) string {
 		scheme, _, _ = strings.Cut(fwd, ",")
 		scheme = strings.TrimSpace(scheme)
 	}
-	return scheme + "://" + host
+	return scheme + "://" + host + forwardedPrefix(r)
+}
+
+// forwardedPrefix reads the path prefix a proxy mounted us under, normalized to "/prefix" without
+// a trailing slash, so downloads stay inside that mount. Anything that is not a plain absolute
+// path is ignored rather than passed through: no prefix at all is the working default, while a
+// prefix carrying a host or a scheme would point every download somewhere else entirely. The
+// segment walk and the absolute-path gate both read the form that is actually emitted rather than
+// the one url.Parse reports: an empty segment is the "///host" url.Parse declines to read as an
+// authority, a dot segment is what a proxy resolves away before matching its own location, and
+// "%2F@host" has an absolute u.Path but escapes back into an authority.
+func forwardedPrefix(r *http.Request) string {
+	prefix, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Prefix"), ",")
+	prefix = strings.TrimRight(strings.TrimSpace(prefix), "/")
+	if prefix == "" {
+		return ""
+	}
+	u, err := url.Parse(prefix)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.RawQuery != "" || u.Fragment != "" {
+		return ""
+	}
+	esc := u.EscapedPath()
+	if !strings.HasPrefix(esc, "/") {
+		return ""
+	}
+	for _, seg := range strings.Split(u.Path, "/")[1:] {
+		if seg == "" || seg == "." || seg == ".." {
+			return ""
+		}
+	}
+	return esc
 }
 
 // serveFile hands out a cached attachment by file_unique_id, the id get_file returns in its

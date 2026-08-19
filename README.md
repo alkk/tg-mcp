@@ -146,12 +146,75 @@ follow releases, `main` tracks the main branch. `docker compose build` builds lo
 health-checks `/ping`. It takes `TELEGRAM_TOKEN` and `AUTH_TOKEN` from the environment (or an
 `.env` file beside it) and refuses to start without them.
 
-TLS is the reverse proxy's job — route `https://<host>/mcp` and `https://<host>/files/` to the
-container. `get_file` builds its download urls from the host the MCP client reached, honoring
-`X-Forwarded-Host` / `X-Forwarded-Proto`, so no public-url setting is needed.
+TLS is the reverse proxy's job — see [Behind a reverse proxy](#behind-a-reverse-proxy).
 
 For `--telegram.local` mode, the volume the `telegram-bot-api` server writes to must be mounted
 into this container at the same path it reports in `file_path`.
+
+### Behind a reverse proxy
+
+`get_file` builds its download urls from the request the MCP call arrived on, honoring
+`X-Forwarded-Host`, `X-Forwarded-Proto` and `X-Forwarded-Prefix`, so there is no public-url
+setting to keep in sync with the proxy. Forward all three and the links come out right; forward
+none and they are built from the `Host` header of the incoming request over plain `http://` —
+which points at the container as soon as the proxy rewrites `Host`, and stays `http://` once TLS
+terminates in front. Every header below is load-bearing, not decoration.
+
+Whole host, endpoints at their own paths:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name tg.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # streamable http keeps the response open
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+    }
+}
+```
+
+Client url: `https://tg.example.com/mcp`.
+
+Mounted under a prefix, sharing a host with other services — `X-Forwarded-Prefix` is what keeps
+the download links inside the mount:
+
+```nginx
+location /tg-mcp/ {
+    proxy_pass http://127.0.0.1:8080/;
+    proxy_http_version 1.1;
+    proxy_set_header Host               $host;
+    proxy_set_header X-Forwarded-Host   $host;
+    proxy_set_header X-Forwarded-Proto  $scheme;
+    proxy_set_header X-Forwarded-Prefix /tg-mcp;
+
+    proxy_buffering off;
+    proxy_read_timeout 1h;
+}
+```
+
+The trailing slash on `proxy_pass` strips the prefix, so `/tg-mcp/mcp` reaches `/mcp` and
+`/tg-mcp/files/<id>` reaches `/files/<id>`; `X-Forwarded-Prefix` puts it back on the way out, so
+`get_file` returns `https://tg.example.com/tg-mcp/files/<id>`. Client url:
+`https://tg.example.com/tg-mcp/mcp`. `/ping` follows the prefix too
+(`https://tg.example.com/tg-mcp/ping`) — it stays unauthenticated, so keep it off the public
+listener if that matters.
+
+Both the MCP endpoint and `/files/` sit behind the bearer token; the proxy does not need to add
+anything, but it must pass the `Authorization` header through untouched. A prefix that is not a
+plain absolute path (a full url, a query string) is ignored rather than trusted — links then fall
+back to the host root.
+
+Traefik and Caddy set `X-Forwarded-Host` / `-Proto` on their own. For a prefixed mount, Traefik's
+`stripPrefix` middleware adds `X-Forwarded-Prefix` as well; in Caddy, `handle_path` strips the
+prefix but the header is yours to add (`header_up X-Forwarded-Prefix /tg-mcp`).
 
 ### From source
 

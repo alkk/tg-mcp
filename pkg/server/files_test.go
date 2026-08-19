@@ -329,6 +329,53 @@ func TestFileURLFollowsTheClient(t *testing.T) {
 	spoofed := call("tg.example.com", map[string]string{baseHeader: "https://evil.example.com"}, false)
 	assert.Equal(t, "http://tg.example.com/files/u1", fileURL(spoofed, "u1"),
 		"a base the client sent itself never survives")
+
+	mounted := call("tg.example.com", map[string]string{
+		"X-Forwarded-Proto": "https", "X-Forwarded-Host": "support.example.com",
+		"X-Forwarded-Prefix": "/tg-mcp/",
+	}, false)
+	assert.Equal(t, "https://support.example.com/tg-mcp/files/u1", fileURL(mounted, "u1"),
+		"downloads stay inside the mount the proxy announced")
+}
+
+func TestForwardedPrefix(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{name: "absent"},
+		{name: "plain", header: "/tg-mcp", want: "/tg-mcp"},
+		{name: "trailing slash", header: "/tg-mcp/", want: "/tg-mcp"},
+		{name: "padded", header: "  /tg-mcp  ", want: "/tg-mcp"},
+		{name: "chained", header: "/tg-mcp, /inner", want: "/tg-mcp"},
+		{name: "nested", header: "/support/tg-mcp", want: "/support/tg-mcp"},
+		{name: "escaped", header: "/tg mcp", want: "/tg%20mcp"},
+		{name: "root only", header: "/"},
+		{name: "relative", header: "tg-mcp"},
+		{name: "absolute url", header: "https://evil.example.com/tg-mcp"},
+		{name: "protocol relative", header: "//evil.example.com"},
+		{name: "triple slash", header: "///evil.example.com"},
+		{name: "embedded double slash", header: "/tg-mcp//inner"},
+		{name: "encoded slash authority", header: "%2F@evil.example.com"},
+		{name: "encoded slash", header: "%2Ftg-mcp"},
+		{name: "dot dot", header: "/tg-mcp/.."},
+		{name: "encoded dot dot", header: "/tg-mcp/%2e%2e"},
+		{name: "single dot", header: "/tg-mcp/./inner"},
+		{name: "query", header: "/tg-mcp?a=b"},
+		{name: "fragment", header: "/tg-mcp#frag"},
+		{name: "control character", header: "/tg\x7fmcp"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/mcp", http.NoBody)
+			if tt.header != "" {
+				req.Header.Set("X-Forwarded-Prefix", tt.header)
+			}
+			assert.Equal(t, tt.want, forwardedPrefix(req))
+		})
+	}
 }
 
 func TestInlineContentUnreadableFile(t *testing.T) {

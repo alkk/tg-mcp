@@ -71,9 +71,11 @@ These are decisions, not accidents — changing one needs a reason.
   and unescape entities, otherwise they would pin a contract telegram does not honour.
 - **`--telegram.local` is an explicit flag, not path probing.** A missing shared volume must fail
   loudly instead of falling through to a confusing HTTP 404.
-- **`/files/` urls are derived from the request host** (`X-Forwarded-Host`/`-Proto` honoured), so
-  there is no public-url setting to keep in sync with the reverse proxy. `trackBase` pins the base
-  onto the `/mcp` request itself (`X-Tg-Mcp-Base`, always set or cleared, so a client cannot supply
+- **`/files/` urls are derived from the request host** (`X-Forwarded-Host`/`-Proto`/`-Prefix`
+  honoured, the last one so a proxy that mounts us under a path keeps the downloads inside that
+  mount; a prefix that is not a plain absolute path is dropped, since the host root at least
+  works), so there is no public-url setting to keep in sync with the reverse proxy. `trackBase`
+  pins the base onto the `/mcp` request itself (`X-Tg-Mcp-Base`, always set or cleared, so a client cannot supply
   one) and the tool call reads it back from `CallToolRequest.Extra.Header`: no shared state, so a
   concurrent call on another hostname cannot repoint the links of this one, and a download curl'd
   off the listener never touches them.
