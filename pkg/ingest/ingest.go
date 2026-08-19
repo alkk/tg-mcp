@@ -155,7 +155,6 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 }
 
-// persist writes the whole batch in one transaction.
 func (s *Service) persist(ctx context.Context, recs []record) error {
 	if len(recs) == 0 {
 		return nil
@@ -278,7 +277,6 @@ func (s *Service) isBot(u *telegram.User) bool {
 	return false
 }
 
-// stopped reports whether shutdown was requested.
 func stopped(ctx context.Context) bool {
 	select {
 	case <-ctx.Done():
@@ -301,7 +299,6 @@ func (s *Service) wait(ctx context.Context, d time.Duration) {
 	}
 }
 
-// backoff doubles the base delay per consecutive failure, capped.
 func (s *Service) backoff(attempt int) time.Duration {
 	d := s.backoffBase
 	for i := 1; i < attempt && d < s.maxBackoff; i++ {

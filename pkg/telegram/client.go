@@ -63,7 +63,6 @@ type APIError struct {
 	MigrateToChatID int64
 }
 
-// Error implements the error interface.
 func (e *APIError) Error() string {
 	return fmt.Sprintf("telegram %s failed: %d %s", e.Method, e.Code, e.Description)
 }

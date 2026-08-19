@@ -24,13 +24,10 @@ const (
 	listNewDefaultLimit = 100
 	historyDefaultLimit = 200
 	searchDefaultLimit  = 50
-	// maxLimit caps what any listing tool returns in one call, whatever the caller asked for.
-	maxLimit = 1000
-	// historyWindow is how far back get_history looks when neither bound is given.
-	historyWindow = 24 * time.Hour
-	// snippetRunes bounds the excerpt of listings that show a preview instead of the full text.
-	snippetRunes = 200
-	ellipsis     = "…"
+	maxLimit            = 1000
+	historyWindow       = 24 * time.Hour
+	snippetRunes        = 200
+	ellipsis            = "…"
 	// maxReplyRunes is the telegram limit for a single text message.
 	maxReplyRunes = 4096
 	// logSentTimeout bounds the write that logs a reply telegram already delivered; it runs on a
@@ -139,7 +136,6 @@ type markHandledResult struct {
 	MarkedUpTo int64  `json:"marked_up_to"`
 }
 
-// registerTools wires the tools onto the MCP server.
 func (s *Server) registerTools() {
 	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true}
 
@@ -302,7 +298,6 @@ func (s *Server) replyTarget(ctx context.Context, customer, label string,
 	return config.Chat{}, store.Message{}, err
 }
 
-// chatOfMessage finds which of a customer's groups holds a message id.
 func (s *Server) chatOfMessage(ctx context.Context, customer string, messageID int64,
 	ambiguous *AmbiguousChatError) (config.Chat, store.Message, error) {
 	chats, err := s.customerChats(customer)
@@ -528,7 +523,6 @@ func (s *Server) search(ctx context.Context, _ *mcp.CallToolRequest,
 	return nil, messagesResult{Messages: s.hitViews(hits)}, nil
 }
 
-// views renders messages with their full text.
 func (s *Server) views(msgs []store.Message) []messageView {
 	name := s.chatNamer()
 	res := make([]messageView, 0, len(msgs))
@@ -538,7 +532,6 @@ func (s *Server) views(msgs []store.Message) []messageView {
 	return res
 }
 
-// snippetViews renders messages with a bounded excerpt instead of the full text.
 func (s *Server) snippetViews(msgs []store.Message) []messageView {
 	res := s.views(msgs)
 	for i := range res {
@@ -547,7 +540,6 @@ func (s *Server) snippetViews(msgs []store.Message) []messageView {
 	return res
 }
 
-// hitViews renders search results, keeping the excerpt the store built around the match.
 func (s *Server) hitViews(hits []store.SearchHit) []messageView {
 	name := s.chatNamer()
 	res := make([]messageView, 0, len(hits))
@@ -602,7 +594,6 @@ func (s *Server) chatNamer() func(chatID int64) (customer, label string) {
 	}
 }
 
-// timeRange parses the optional RFC3339 bounds of a tool call.
 func timeRange(from, to string) (fromT, toT time.Time, err error) {
 	if fromT, err = parseBound("from", from); err != nil {
 		return time.Time{}, time.Time{}, err

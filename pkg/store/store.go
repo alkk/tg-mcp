@@ -430,7 +430,6 @@ func (s *Store) queryMessages(ctx context.Context, query string, args ...any) ([
 	return res, nil
 }
 
-// inClause renders a parenthesized placeholder list with its arguments.
 func inClause(ids []int64) (string, []any) {
 	args := make([]any, len(ids))
 	for i, id := range ids {

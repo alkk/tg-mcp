@@ -14,13 +14,11 @@ import (
 
 const (
 	// maxRun is the longest asterisk run that can still be a delimiter; four or more are literal.
-	maxRun = 3
-	// minFence is the shortest backtick run that can open or close a code block.
+	maxRun   = 3
 	minFence = 3
 )
 
 var (
-	// fenceLang is the whole info string of a fence; anything else is not a language tag.
 	fenceLang = regexp.MustCompile(`^[A-Za-z0-9+#._-]+$`)
 	// heading needs the space after the hashes, so #!/bin/sh is not a heading. The level is not
 	// captured: telegram has no heading entity, so every level renders as bold.

@@ -35,8 +35,7 @@ const (
 	sigBytes = 16
 	// baseHeader carries the externally visible base url of the /mcp request into the tool call.
 	// trackBase always sets or clears it, so a client cannot smuggle one in.
-	baseHeader = "X-Tg-Mcp-Base"
-	// threadImageCap bounds how many images ride along with a conversation read.
+	baseHeader     = "X-Tg-Mcp-Base"
 	threadImageCap = 5
 	// threadImageTimeout bounds the whole fetch round of a thread read: a slow attachment must
 	// not hold up the conversation it was posted in.
@@ -112,7 +111,6 @@ func displayName(m store.Message) string {
 	return m.FileUniqueID
 }
 
-// cachedFile returns the local path of an attachment, downloading it on a cache miss.
 func (s *Server) cachedFile(ctx context.Context, m store.Message) (string, error) {
 	if path, ok := s.store.Cached(m.FileUniqueID); ok {
 		return path, nil
@@ -172,7 +170,6 @@ func inlineContent(path, name string, size int64) (mcp.Content, string, error) {
 	return nil, mimeType, nil
 }
 
-// extType resolves an attachment name to a media type, empty when the extension says nothing.
 func extType(name string) string {
 	return baseType(mime.TypeByExtension(strings.ToLower(filepath.Ext(name))))
 }
@@ -200,7 +197,6 @@ func isTextual(mimeType string) bool {
 	return false
 }
 
-// baseType drops the parameters of a media type, leaving just type/subtype.
 func baseType(mimeType string) string {
 	base, _, _ := strings.Cut(mimeType, ";")
 	return strings.TrimSpace(base)
@@ -295,7 +291,6 @@ func (s *Server) threadImage(ctx context.Context, m store.Message) (content mcp.
 // so a link signature can never be replayed as a credential and the key rotates with the token.
 const linkKeyPurpose = "tg-mcp/files-url/v1"
 
-// deriveLinkKey derives the key signing download links from the bearer token.
 func deriveLinkKey(authToken string) []byte {
 	mac := hmac.New(sha256.New, []byte(authToken))
 	mac.Write([]byte(linkKeyPurpose))
