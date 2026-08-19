@@ -27,7 +27,7 @@ import (
 
 const (
 	// inlineLimit bounds what travels inside a tool result; anything bigger is served over http.
-	inlineLimit = 1 << 20
+	inlineLimit = 1024 * 1024
 	filesRoute  = "/files/"
 	sniffLen    = 512
 	// sigBytes is how much of the mac lands in the url; 128 bits is far past what a minutes-long

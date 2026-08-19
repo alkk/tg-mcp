@@ -21,8 +21,8 @@ const (
 	defaultTimeout  = 30 * time.Second
 	longPollGrace   = 10 * time.Second // added on top of the poll timeout so the server replies first
 	maxRetryAfter   = 60 * time.Second
-	maxResponseSize = 32 << 20
-	cloudFileLimit  = 20 << 20 // getFile on the cloud api server refuses anything larger
+	maxResponseSize = 32 * 1024 * 1024
+	cloudFileLimit  = 20 * 1024 * 1024 // getFile on the cloud api server refuses anything larger
 )
 
 // ParseModeHTML selects the telegram html subset for SendMessage.
@@ -170,7 +170,7 @@ func (c *Client) Download(ctx context.Context, filePath string, dst io.Writer) e
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
 		return fmt.Errorf("download %q: http %d: %s", filePath, resp.StatusCode, describe(body))
 	}
 	if _, err := io.Copy(dst, resp.Body); err != nil {
