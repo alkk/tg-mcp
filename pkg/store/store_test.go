@@ -22,7 +22,7 @@ func TestNew(t *testing.T) {
 		defer s.Close()
 
 		assert.Equal(t, dir, s.Dir())
-		for _, table := range []string{"messages", "chats", "cursors", "messages_fts"} {
+		for _, table := range []string{"messages", "chats", "cursors", "messages_fts", "pending_messages"} {
 			var name string
 			err := s.db.QueryRow(`SELECT name FROM sqlite_master WHERE name = ?`, table).Scan(&name)
 			require.NoError(t, err, "table %s missing", table)

@@ -19,6 +19,9 @@ import (
 //			UpsertBatchFunc: func(ctx context.Context, msgs []store.Message) error {
 //				panic("mock out the UpsertBatch method")
 //			},
+//			UpsertPendingBatchFunc: func(ctx context.Context, msgs []store.Pending) error {
+//				panic("mock out the UpsertPendingBatch method")
+//			},
 //		}
 //
 //		// use mockedmessageStore in code that requires ingest.messageStore
@@ -29,6 +32,9 @@ type MessageStore struct {
 	// UpsertBatchFunc mocks the UpsertBatch method.
 	UpsertBatchFunc func(ctx context.Context, msgs []store.Message) error
 
+	// UpsertPendingBatchFunc mocks the UpsertPendingBatch method.
+	UpsertPendingBatchFunc func(ctx context.Context, msgs []store.Pending) error
+
 	// calls tracks calls to the methods.
 	calls struct {
 		// UpsertBatch holds details about calls to the UpsertBatch method.
@@ -38,8 +44,16 @@ type MessageStore struct {
 			// Msgs is the msgs argument value.
 			Msgs []store.Message
 		}
+		// UpsertPendingBatch holds details about calls to the UpsertPendingBatch method.
+		UpsertPendingBatch []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Msgs is the msgs argument value.
+			Msgs []store.Pending
+		}
 	}
-	lockUpsertBatch sync.RWMutex
+	lockUpsertBatch        sync.RWMutex
+	lockUpsertPendingBatch sync.RWMutex
 }
 
 // UpsertBatch calls UpsertBatchFunc.
@@ -75,5 +89,41 @@ func (mock *MessageStore) UpsertBatchCalls() []struct {
 	mock.lockUpsertBatch.RLock()
 	calls = mock.calls.UpsertBatch
 	mock.lockUpsertBatch.RUnlock()
+	return calls
+}
+
+// UpsertPendingBatch calls UpsertPendingBatchFunc.
+func (mock *MessageStore) UpsertPendingBatch(ctx context.Context, msgs []store.Pending) error {
+	if mock.UpsertPendingBatchFunc == nil {
+		panic("MessageStore.UpsertPendingBatchFunc: method is nil but messageStore.UpsertPendingBatch was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		Msgs []store.Pending
+	}{
+		Ctx:  ctx,
+		Msgs: msgs,
+	}
+	mock.lockUpsertPendingBatch.Lock()
+	mock.calls.UpsertPendingBatch = append(mock.calls.UpsertPendingBatch, callInfo)
+	mock.lockUpsertPendingBatch.Unlock()
+	return mock.UpsertPendingBatchFunc(ctx, msgs)
+}
+
+// UpsertPendingBatchCalls gets all the calls that were made to UpsertPendingBatch.
+// Check the length with:
+//
+//	len(mockedmessageStore.UpsertPendingBatchCalls())
+func (mock *MessageStore) UpsertPendingBatchCalls() []struct {
+	Ctx  context.Context
+	Msgs []store.Pending
+} {
+	var calls []struct {
+		Ctx  context.Context
+		Msgs []store.Pending
+	}
+	mock.lockUpsertPendingBatch.RLock()
+	calls = mock.calls.UpsertPendingBatch
+	mock.lockUpsertPendingBatch.RUnlock()
 	return calls
 }

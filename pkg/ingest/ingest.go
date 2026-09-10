@@ -29,6 +29,7 @@ type botAPI interface {
 // messageStore persists a batch of messages atomically.
 type messageStore interface {
 	UpsertBatch(ctx context.Context, msgs []store.Message) error
+	UpsertPendingBatch(ctx context.Context, msgs []store.Pending) error
 }
 
 const (
@@ -60,6 +61,8 @@ type Service struct {
 	backoffBase time.Duration
 	maxBackoff  time.Duration
 	retries     int
+
+	seenUnknown map[int64]struct{} // chats already announced by noteUnknown
 }
 
 // New creates an ingest service.
@@ -74,6 +77,7 @@ func New(p Params) *Service {
 		backoffBase: defaultBackoff,
 		maxBackoff:  maxBackoff,
 		retries:     storeRetries,
+		seenUnknown: map[int64]struct{}{},
 	}
 	if s.pollTimeout <= 0 {
 		s.pollTimeout = defaultPollTimeout
@@ -82,11 +86,17 @@ func New(p Params) *Service {
 }
 
 // record pairs a mapped message with the update it came from, so a poison update can be logged
-// with its raw payload before it is skipped.
+// with its raw payload before it is skipped. unknown is non-nil when the chat is outside the
+// allowlist, which sends the message to the pending buffer instead of the messages table.
 type record struct {
-	update telegram.Update
-	msg    store.Message
+	update  telegram.Update
+	msg     store.Message
+	unknown *chatRef
 }
+
+// chatRef is the chat identity as it looked when a message was first buffered; it is what the
+// startup summary hands the operator to write the chats.yml entry.
+type chatRef struct{ title, kind string }
 
 // Run drives the poll loop until the context is canceled. A webhook or a competing poller
 // (409 Conflict) is fatal, as is a token the api rejects outright (401/403/404); everything else
@@ -162,22 +172,56 @@ func (s *Service) persist(ctx context.Context, recs []record) error {
 	if len(recs) == 0 {
 		return nil
 	}
-	msgs := make([]store.Message, 0, len(recs))
-	for _, r := range recs {
-		msgs = append(msgs, r.msg)
+	// each call is guarded on its own slice: a batch of nothing but unknown chats still yields
+	// records, so the early return above no longer keeps an empty slice away from the store
+	msgs, pend := split(recs, time.Now())
+	if len(pend) > 0 {
+		if err := s.store.UpsertPendingBatch(ctx, pend); err != nil {
+			return fmt.Errorf("buffer %d messages: %w", len(pend), err)
+		}
 	}
-	if err := s.store.UpsertBatch(ctx, msgs); err != nil {
-		return fmt.Errorf("store %d messages: %w", len(msgs), err)
+	if len(msgs) > 0 {
+		if err := s.store.UpsertBatch(ctx, msgs); err != nil {
+			return fmt.Errorf("store %d messages: %w", len(msgs), err)
+		}
 	}
 	return nil
+}
+
+// split sorts the records into the ones bound for the messages table and the ones buffered for
+// a chat the allowlist does not know yet.
+func split(recs []record, now time.Time) (msgs []store.Message, pend []store.Pending) {
+	for _, r := range recs {
+		if r.unknown == nil {
+			msgs = append(msgs, r.msg)
+			continue
+		}
+		pend = append(pend, pendingOf(r, now))
+	}
+	return msgs, pend
+}
+
+func pendingOf(r record, now time.Time) store.Pending {
+	return store.Pending{
+		Message:   r.msg,
+		ChatTitle: r.unknown.title,
+		ChatType:  r.unknown.kind,
+		Received:  now,
+	}
 }
 
 // skipPoison retries the batch message by message so one bad update cannot stall every chat;
 // what the database rejects is logged with its full payload and dropped. It reports whether the
 // replay ran to the end: a database-wide failure aborts it so the caller keeps the offset pinned.
 func (s *Service) skipPoison(ctx context.Context, recs []record) bool {
+	now := time.Now()
 	for _, r := range recs {
-		err := s.store.UpsertBatch(ctx, []store.Message{r.msg})
+		var err error
+		if r.unknown != nil {
+			err = s.store.UpsertPendingBatch(ctx, []store.Pending{pendingOf(r, now)})
+		} else {
+			err = s.store.UpsertBatch(ctx, []store.Message{r.msg})
+		}
 		switch {
 		case err == nil:
 		case errors.Is(err, store.ErrBadMessage):
@@ -196,37 +240,71 @@ func (s *Service) skipPoison(ctx context.Context, recs []record) bool {
 func (s *Service) collect(updates []telegram.Update) []record {
 	recs := make([]record, 0, len(updates))
 	for _, u := range updates {
-		msg, ok := s.convert(u)
+		m := messageOf(u)
+		if m == nil {
+			slog.Debug("update carries no message", "update_id", u.UpdateID)
+			continue
+		}
+		// ahead of the allowlist check, so a migrated chat is neither announced as unknown nor
+		// buffered under an id that no longer exists
+		if m.MigrateToChatID != 0 {
+			slog.Warn("chat migrated to a supergroup, update the chat map",
+				"old_chat_id", m.Chat.ID, "new_chat_id", m.MigrateToChatID, "title", m.Chat.Title)
+			continue
+		}
+		var unknown *chatRef
+		if _, allowed := s.chats.ByChat(m.Chat.ID); !allowed {
+			ref := &chatRef{title: m.Chat.Title, kind: m.Chat.Type}
+			// before the convert guard below: a group where the bot was just added and nobody has
+			// spoken yet carries only the join event, and it still has to announce its chat id
+			s.noteUnknown(m.Chat.ID, ref)
+			if !bufferable(ref.kind) {
+				continue
+			}
+			unknown = ref
+		}
+		msg, ok := s.convert(m)
 		if !ok {
 			continue
 		}
-		recs = append(recs, record{update: u, msg: msg})
+		recs = append(recs, record{update: u, msg: msg, unknown: unknown})
 	}
 	return recs
 }
 
-// convert maps an update to a stored message; ok is false for everything filtered out.
-func (s *Service) convert(u telegram.Update) (msg store.Message, ok bool) {
-	m := u.Message
-	if m == nil {
-		m = u.EditedMessage
+// messageOf picks the message an update carries, new or edited; nil for everything else.
+func messageOf(u telegram.Update) *telegram.Message {
+	if u.Message != nil {
+		return u.Message
 	}
-	if m == nil {
-		slog.Debug("update carries no message", "update_id", u.UpdateID)
-		return store.Message{}, false
-	}
+	return u.EditedMessage
+}
 
-	if m.MigrateToChatID != 0 {
-		slog.Warn("chat migrated to a supergroup, update the chat map",
-			"old_chat_id", m.Chat.ID, "new_chat_id", m.MigrateToChatID, "title", m.Chat.Title)
-		return store.Message{}, false
-	}
-	if _, allowed := s.chats.ByChat(m.Chat.ID); !allowed {
-		slog.Info("message from a chat outside the allowlist dropped",
-			"chat_id", m.Chat.ID, "title", m.Chat.Title, "type", m.Chat.Type)
-		return store.Message{}, false
-	}
+// bufferable reports whether a chat outside the allowlist is one the buffer exists for. Only
+// groups are ever written into chats.yml, so a private chat is a stranger messaging the bot: it
+// has no replay to wait for, and holding it would keep unsolicited direct messages on disk and
+// hand anyone who knows the bot username a way to grow the database.
+func bufferable(kind string) bool {
+	return kind == "group" || kind == "supergroup"
+}
 
+// noteUnknown logs a chat outside the allowlist once per process run: the operator needs the id
+// once to write the chats.yml line, not once per message. No mutex — Run is single-goroutine.
+func (s *Service) noteUnknown(chatID int64, ref *chatRef) {
+	if _, seen := s.seenUnknown[chatID]; seen {
+		return
+	}
+	s.seenUnknown[chatID] = struct{}{}
+	msg := "dropping messages from a chat outside the allowlist"
+	if bufferable(ref.kind) {
+		msg = "buffering messages from a chat outside the allowlist"
+	}
+	slog.Info(msg, "chat_id", chatID, "title", ref.title, "type", ref.kind)
+}
+
+// convert maps a message to a stored one; ok is false for a service message, which carries
+// nothing worth keeping.
+func (s *Service) convert(m *telegram.Message) (msg store.Message, ok bool) {
 	media, hasMedia := m.Media()
 	if m.Body() == "" && !hasMedia {
 		slog.Debug("service message dropped", "chat_id", m.Chat.ID, "message_id", m.MessageID)

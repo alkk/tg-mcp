@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -22,6 +23,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/alkk/tg-mcp/pkg/store"
 )
 
 const (
@@ -38,6 +41,11 @@ const (
 	// deliberately not the 5m both the flag and the server default to, so a link ttl that never
 	// reaches the server is visible instead of coincidentally right
 	e2eLinkTTL = 17 * time.Minute
+	// short enough to expire the seeded backlog below and shorter than every other ttl in the
+	// test, so a pending ttl wired to the wrong flag leaves that backlog behind
+	e2ePendingTTL = 5 * time.Minute
+	// a chat nobody ever adds to the map: its buffer is what the sweep is measured on
+	e2eStrayChat = -1005555555555
 )
 
 // e2eMessage mirrors the message view the tools hand out; the server-side type is unexported.
@@ -114,33 +122,8 @@ func TestE2ESmoke(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
-	appCtx, stopApp := context.WithCancel(ctx)
-	done := make(chan error, 1)
-	go func() { done <- run(appCtx, opts) }()
-	defer func() {
-		stopApp()
-		select {
-		case err := <-done:
-			require.NoError(t, err)
-		case <-time.After(15 * time.Second):
-			t.Error("app did not shut down")
-		}
-	}()
-
-	baseURL := "http://" + opts.Listen
-	require.Eventually(t, func() bool {
-		resp, err := http.Get(baseURL + "/ping")
-		if err != nil {
-			return false
-		}
-		defer resp.Body.Close()
-		return resp.StatusCode == http.StatusOK
-	}, 10*time.Second, 20*time.Millisecond, "server never came up")
-
-	client := mcp.NewClient(&mcp.Implementation{Name: "e2e", Version: "v1"}, nil)
-	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint: baseURL + "/mcp", HTTPClient: e2eBearerClient(e2eAuthToken)}, nil)
-	require.NoError(t, err)
+	baseURL, _ := startApp(ctx, t, opts)
+	session := e2eSession(ctx, t, baseURL)
 	defer func() { _ = session.Close() }()
 
 	t.Run("all tools are exposed", func(t *testing.T) {
@@ -155,12 +138,16 @@ func TestE2ESmoke(t *testing.T) {
 	})
 
 	// the ingest loop picks the scripted batch up on its first poll
-	var listed e2eMessages
+	var (
+		listed  e2eMessages
+		listErr error
+	)
 	require.Eventually(t, func() bool {
 		listed = e2eMessages{}
-		callTool(ctx, t, session, "list_new", nil, &listed)
-		return len(listed.Messages) == 4
+		listErr = tryCallTool(ctx, session, "list_new", nil, &listed)
+		return listErr == nil && len(listed.Messages) == 4
 	}, 15*time.Second, 50*time.Millisecond, "ingest did not store the scripted batch: %+v", listed)
+	require.NoError(t, listErr)
 
 	t.Run("list_new shows the ingested messages", func(t *testing.T) {
 		ids := make([]int64, 0, len(listed.Messages))
@@ -171,7 +158,7 @@ func TestE2ESmoke(t *testing.T) {
 			assert.Empty(t, m.Text, "listings carry a snippet, not the full text")
 			assert.NotEmpty(t, m.Snippet)
 		}
-		assert.Equal(t, []int64{101, 102, 103, 105}, ids, "non-allowlisted chat and service message dropped")
+		assert.Equal(t, []int64{101, 102, 103, 105}, ids, "non-allowlisted chat buffered, service message dropped")
 
 		assert.Contains(t, listed.Messages[0].Snippet, "after the upgrade", "edit applied")
 		assert.NotEmpty(t, listed.Messages[0].EditedAt)
@@ -189,6 +176,12 @@ func TestE2ESmoke(t *testing.T) {
 		assert.Equal(t, 4, res.Customers[0].Unread)
 		require.Len(t, res.Customers[0].Groups, 1)
 		assert.Equal(t, 4, res.Customers[0].Groups[0].Unread)
+	})
+
+	t.Run("the stored batch is acknowledged to telegram", func(t *testing.T) {
+		require.Eventually(t, func() bool { return api.confirmedOffset() >= 8 },
+			15*time.Second, 50*time.Millisecond,
+			"the offset advances only after the batch is committed, on the next getUpdates")
 	})
 
 	t.Run("get_thread reconstructs the conversation", func(t *testing.T) {
@@ -372,6 +365,185 @@ func TestE2ESmoke(t *testing.T) {
 	})
 }
 
+// TestE2EPendingReplay walks the operator workflow for a group the chat map does not know yet:
+// the bot is already in it, its messages are buffered instead of dropped, and the restart that
+// follows the chats.yml edit replays them. By then the fake api has forgotten the update — the
+// offset it was given acknowledged it — so only the buffer can still produce the message.
+func TestE2EPendingReplay(t *testing.T) {
+	api := startFakeAPI(t)
+
+	chatsPath := writeChats(t, fmt.Sprintf("chats:\n  %d:\n    customer: acme\n", e2eChatID))
+	opts := &options{
+		AuthToken:   e2eAuthToken,
+		Listen:      freeAddr(t),
+		Data:        t.TempDir(),
+		Chats:       chatsPath,
+		FileLinkTTL: e2eLinkTTL,
+		PendingTTL:  e2ePendingTTL,
+	}
+	opts.Telegram.Token = e2eBotToken
+	opts.Telegram.APIURL = api.URL
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	baseURL, stopFirst := startApp(ctx, t, opts)
+	first := e2eSession(ctx, t, baseURL)
+
+	var (
+		listed  e2eMessages
+		listErr error
+	)
+	require.Eventually(t, func() bool {
+		listed = e2eMessages{}
+		listErr = tryCallTool(ctx, first, "list_new", nil, &listed)
+		return listErr == nil && len(listed.Messages) == 4
+	}, 15*time.Second, 50*time.Millisecond, "ingest did not store the scripted batch: %+v", listed)
+	require.NoError(t, listErr)
+	for _, m := range listed.Messages {
+		assert.Equal(t, "acme", m.Customer, "the unknown chat is buffered, not readable")
+	}
+
+	// the update is unrecoverable only once the offset past it reached telegram
+	require.Eventually(t, func() bool { return api.confirmedOffset() >= 8 },
+		15*time.Second, 50*time.Millisecond,
+		"the offset advances only after the batch is committed, on the next getUpdates")
+
+	require.NoError(t, first.Close())
+	stopFirst()
+
+	require.NoError(t, os.WriteFile(chatsPath, []byte(fmt.Sprintf(
+		"chats:\n  %d:\n    customer: acme\n  %d:\n    customer: randoms\n",
+		e2eChatID, e2eOtherChat)), 0o600))
+
+	// a chat that stays unknown, buffered longer ago than --pending-ttl but well inside every
+	// other ttl the test hands the app: the restart below must sweep it
+	seedStrayPending(t, opts.Data, time.Now().Add(-2*e2ePendingTTL))
+
+	baseURL, _ = startApp(ctx, t, opts)
+	second := e2eSession(ctx, t, baseURL)
+	defer func() { _ = second.Close() }()
+
+	t.Run("the buffered message is replayed into the group the map now knows", func(t *testing.T) {
+		var res e2eMessages
+		callTool(ctx, t, second, "get_thread",
+			map[string]any{"customer": "randoms", "message_id": 1}, &res)
+		require.Len(t, res.Messages, 1)
+		assert.Equal(t, int64(1), res.Messages[0].MessageID)
+		assert.Equal(t, "who are you", res.Messages[0].Text)
+		assert.Equal(t, "John", res.Messages[0].Sender)
+	})
+
+	t.Run("list_new surfaces the recovered backlog as untriaged", func(t *testing.T) {
+		var res e2eMessages
+		callTool(ctx, t, second, "list_new", map[string]any{"customer": "randoms"}, &res)
+		require.Len(t, res.Messages, 1)
+		assert.Equal(t, int64(1), res.Messages[0].MessageID)
+		assert.Contains(t, res.Messages[0].Snippet, "who are you")
+	})
+
+	t.Run("the acme messages of the first run are untouched", func(t *testing.T) {
+		var res e2eMessages
+		callTool(ctx, t, second, "get_history", map[string]any{"customer": "acme"}, &res)
+		assert.Len(t, res.Messages, 4)
+	})
+
+	t.Run("the startup sweep runs on the pending ttl the flag carries", func(t *testing.T) {
+		st, err := store.New(opts.Data)
+		require.NoError(t, err)
+		defer func() { _ = st.Close() }()
+
+		waiting, err := st.PendingChats(ctx)
+		require.NoError(t, err)
+		assert.Empty(t, waiting, "the stray chat aged past --pending-ttl and should be gone")
+	})
+}
+
+// seedStrayPending buffers one message from a chat the map never learns, received at the given
+// time, straight into the store the app is about to open.
+func seedStrayPending(t *testing.T, dir string, received time.Time) {
+	t.Helper()
+	st, err := store.New(dir)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, st.Close()) }()
+
+	require.NoError(t, st.UpsertPendingBatch(context.Background(), []store.Pending{{
+		Message: store.Message{
+			ChatID: e2eStrayChat, MessageID: 1, Sent: received,
+			SenderID: 99, SenderName: "Stray", Text: "anyone there",
+		},
+		ChatTitle: "Stray Group",
+		ChatType:  "supergroup",
+		Received:  received,
+	}}))
+}
+
+// startApp runs the app on its own cancellable context and returns once it answers /ping. Stopping
+// awaits the shutdown, so a second run can bind the same address; it also runs as a cleanup, so a
+// failing assertion never leaves the listener behind.
+func startApp(ctx context.Context, t *testing.T, opts *options) (baseURL string, stop func()) {
+	t.Helper()
+	appCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- run(appCtx, opts) }()
+
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-time.After(15 * time.Second):
+				t.Error("app did not shut down")
+			}
+		})
+	}
+	t.Cleanup(stop)
+
+	baseURL = "http://" + opts.Listen
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(baseURL + "/ping")
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}, 10*time.Second, 20*time.Millisecond, "server never came up")
+	return baseURL, stop
+}
+
+func e2eSession(ctx context.Context, t *testing.T, baseURL string) *mcp.ClientSession {
+	t.Helper()
+	client := mcp.NewClient(&mcp.Implementation{Name: "e2e", Version: "v1"}, nil)
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint: baseURL + "/mcp", HTTPClient: e2eBearerClient(e2eAuthToken)}, nil)
+	require.NoError(t, err)
+	return session
+}
+
+// tryCallTool is callTool without the fatal assertions, for use inside a require.Eventually
+// condition: testify runs that on its own goroutine, where t.FailNow would abandon the poll and
+// leave the real error unreported.
+func tryCallTool(ctx context.Context, session *mcp.ClientSession, name string,
+	args map[string]any, out any) error {
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		return fmt.Errorf("call %q: %w", name, err)
+	}
+	if res.IsError {
+		return fmt.Errorf("tool %q failed: %s", name, contentText(res))
+	}
+	data, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		return fmt.Errorf("encode result of %q: %w", name, err)
+	}
+	if err = json.Unmarshal(data, out); err != nil {
+		return fmt.Errorf("decode result of %q: %w", name, err)
+	}
+	return nil
+}
+
 // callTool invokes a tool over the session and decodes its structured result.
 func callTool(ctx context.Context, t *testing.T, session *mcp.ClientSession, name string,
 	args map[string]any, out any) {
@@ -458,9 +630,10 @@ type fakeAPI struct {
 	image   []byte // the photo of message 105
 	files   map[string][]byte
 
-	mu     sync.Mutex
-	sent   []map[string]any
-	nextID int64
+	mu        sync.Mutex
+	sent      []map[string]any
+	nextID    int64
+	confirmed int64 // high-water mark: telegram forgets updates below the offset it was last given
 }
 
 type scriptedUpdate struct {
@@ -512,17 +685,33 @@ func (a *fakeAPI) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// confirmedOffset reports the highest offset the ingest loop has acknowledged, i.e. everything
+// below it is gone for good — a restart sees the batch only through what it already stored.
+func (a *fakeAPI) confirmedOffset() int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.confirmed
+}
+
 // serveUpdates replays the scripted updates the caller has not confirmed yet, honoring the offset
-// the ingest loop advances only after a batch is stored.
+// the ingest loop advances only after a batch is stored. The offset is a confirmation: telegram
+// drops everything below it, so a redelivery cannot resurrect an acknowledged update.
 func (a *fakeAPI) serveUpdates(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Offset int64 `json:"offset"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
+	a.mu.Lock()
+	if req.Offset > a.confirmed {
+		a.confirmed = req.Offset
+	}
+	from := a.confirmed
+	a.mu.Unlock()
+
 	pending := make([]string, 0, len(a.updates))
 	for _, u := range a.updates {
-		if u.id >= req.Offset {
+		if u.id >= from {
 			pending = append(pending, u.body)
 		}
 	}

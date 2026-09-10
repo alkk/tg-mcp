@@ -345,17 +345,17 @@ logging the caller's job.
 - Modify: `pkg/store/store.go`
 - Modify: `pkg/store/store_test.go`
 
-- [ ] append the `pending_messages` table to the `schema` const in `pkg/store/store.go`
-- [ ] create `pkg/store/pending.go` with the `Pending` type (including the always-zero-`ID`
+- [x] append the `pending_messages` table to the `schema` const in `pkg/store/store.go`
+- [x] create `pkg/store/pending.go` with the `Pending` type (including the always-zero-`ID`
       comment) and `UpsertPendingBatch`: one transaction, `ON CONFLICT DO UPDATE` refreshing the
       message columns while omitting `received`, `chat_title` and `chat_type`, errors through
       `classify()`
-- [ ] add `pending_messages` to the table list at `pkg/store/store_test.go:24`
-- [ ] write tests: insert a batch and read the rows back; empty batch is a no-op
-- [ ] write test: re-upserting the same `(chat_id, message_id)` with new text and a new chat title
+- [x] add `pending_messages` to the table list at `pkg/store/store_test.go:24`
+- [x] write tests: insert a batch and read the rows back; empty batch is a no-op
+- [x] write test: re-upserting the same `(chat_id, message_id)` with new text and a new chat title
       updates the text and leaves `received`, `chat_title` and `chat_type` untouched
-- [ ] write test: a constraint-violating row returns an error wrapping `ErrBadMessage`
-- [ ] run `make test` and `make lint` — lint here because this is where the `scanMessage`/`upsertSQL`
+- [x] write test: a constraint-violating row returns an error wrapping `ErrBadMessage`
+- [x] run `make test` and `make lint` — lint here because this is where the `scanMessage`/`upsertSQL`
       duplication `dupl` flags at threshold 100 first appears; must pass before task 2
 
 ### Task 2: ReplayPending
@@ -364,24 +364,24 @@ logging the caller's job.
 - Modify: `pkg/store/pending.go`
 - Modify: `pkg/store/pending_test.go`
 
-- [ ] add `Replayed` and `ReplayPending`, one transaction per chat, rows ordered by
+- [x] add `Replayed` and `ReplayPending`, one transaction per chat, rows ordered by
       `sent, message_id`, reusing `upsertTx` per row, then `DELETE ... WHERE chat_id = ?` in the
       same transaction
-- [ ] write test: only the chats passed in are moved; rows for other chats stay buffered
-- [ ] write test: **the replayed row is returned by a direct `messages_fts MATCH`**, using the
+- [x] write test: only the chats passed in are moved; rows for other chats stay buffered
+- [x] write test: **the replayed row is returned by a direct `messages_fts MATCH`**, using the
       existing `ftsMatch` helper (`pkg/store/store_test.go:755`) — **not** by calling `Search`.
       `Search` falls back to a `LIKE` scan over `messages.text` when FTS returns nothing
       (`pkg/store/search.go:43-56`), so it would happily find a replayed row that has no FTS row at
       all and the assertion would prove nothing. The direct MATCH is what an `INSERT..SELECT`
       implementation fails.
-- [ ] write test: replaying a pending row onto a message that already exists **stops the old text
+- [x] write test: replaying a pending row onto a message that already exists **stops the old text
       matching** — the FTS row must be replaced, not just added to. Replay lands on an existing
       `messages` row whenever a buffered message was edited or the chat was removed and re-added,
       and insertion-only coverage would miss a stale index entry left searchable
-- [ ] write test: replaying into a chat that already has messages (removed and re-added) upserts
+- [x] write test: replaying into a chat that already has messages (removed and re-added) upserts
       cleanly and returns the right count
-- [ ] write test: a chat with nothing buffered produces no `Replayed` entry
-- [ ] run `make test` — must pass before task 3
+- [x] write test: a chat with nothing buffered produces no `Replayed` entry
+- [x] run `make test` — must pass before task 3
 
 ### Task 3: SweepPending and PendingChats
 
@@ -389,20 +389,20 @@ logging the caller's job.
 - Modify: `pkg/store/pending.go`
 - Modify: `pkg/store/pending_test.go`
 
-- [ ] add `SweepPending` (zero ttl means the 14-day default) returning rows affected
-- [ ] add `PendingChat` and `PendingChats` with the single-min/max-aggregate query, plus the comment
+- [x] add `SweepPending` (zero ttl means the 14-day default) returning rows affected
+- [x] add `PendingChat` and `PendingChats` with the single-min/max-aggregate query, plus the comment
       explaining precisely why a second min/max aggregate would break the bare columns
-- [ ] write test: sweep with planted old `received` values removes exactly the expired rows and
+- [x] write test: sweep with planted old `received` values removes exactly the expired rows and
       returns their count; a zero ttl uses the default
-- [ ] write test: `PendingChats` reports the count, the oldest timestamp, and the **first-seen**
+- [x] write test: `PendingChats` reports the count, the oldest timestamp, and the **first-seen**
       title when the group was renamed mid-buffer (a newer row carries the new title, the reported
       one is the old)
-- [ ] write test for the exact trace that falsifies a refreshing upsert: buffer A with title "Old",
+- [x] write test for the exact trace that falsifies a refreshing upsert: buffer A with title "Old",
       buffer B with title "New", then re-upsert A carrying title "New". `PendingChats` must still
       report "Old" and A's original `received`. This is the regression test for the
       freeze-title/first-seen-title pair being one decision
-- [ ] write test: `PendingChats` on an empty table returns no rows, not an error
-- [ ] run `make test` — must pass before task 4
+- [x] write test: `PendingChats` on an empty table returns no rows, not an error
+- [x] run `make test` — must pass before task 4
 
 ### Task 4: Ingest plumbing for the pending store call
 
@@ -414,18 +414,18 @@ Deliberately behaviour-free: the interface, the mock, and the split write path l
 - Modify: `pkg/ingest/mocks/message_store.go` (regenerated)
 - Modify: `pkg/ingest/ingest_test.go`
 
-- [ ] add `UpsertPendingBatch` to the `messageStore` interface and regenerate the mock with
+- [x] add `UpsertPendingBatch` to the `messageStore` interface and regenerate the mock with
       `go generate ./pkg/ingest/...` (moq must be on PATH)
-- [ ] teach `collectingStore` (`ingest_test.go:70`) an `UpsertPendingBatchFunc` recording pending
+- [x] teach `collectingStore` (`ingest_test.go:70`) an `UpsertPendingBatchFunc` recording pending
       batches, plus an accessor — without it moq panics on the nil func the moment `persist` calls
       the method
-- [ ] add `record.unknown *chatRef` and the `chatRef` type, unset for now
-- [ ] split `persist` into the pending call then the messages call, each guarded on its own slice,
+- [x] add `record.unknown *chatRef` and the `chatRef` type, unset for now
+- [x] split `persist` into the pending call then the messages call, each guarded on its own slice,
       with the distinct `buffer %d messages` error text
-- [ ] add the routing switch in `skipPoison` so a pending record replays through the pending method
-- [ ] write test: with every chat allowlisted, `UpsertPendingBatch` is never called and the existing
+- [x] add the routing switch in `skipPoison` so a pending record replays through the pending method
+- [x] write test: with every chat allowlisted, `UpsertPendingBatch` is never called and the existing
       batching behaviour is unchanged
-- [ ] run `make test` — the whole existing suite must still pass untouched before task 5
+- [x] run `make test` — the whole existing suite must still pass untouched before task 5
 
 ### Task 5: Route non-allowlisted messages to the buffer
 
@@ -433,32 +433,32 @@ Deliberately behaviour-free: the interface, the mock, and the split write path l
 - Modify: `pkg/ingest/ingest.go`
 - Modify: `pkg/ingest/ingest_test.go`
 
-- [ ] extract `messageOf(u)` and move the nil-message, `MigrateToChatID` and allowlist checks from
+- [x] extract `messageOf(u)` and move the nil-message, `MigrateToChatID` and allowlist checks from
       `convert()` into `collect()`, leaving `convert()` with the service-message drop and the field
       mapping only
-- [ ] populate `record.unknown` in `collect` and add `noteUnknown` with its per-run dedup map, the
+- [x] populate `record.unknown` in `collect` and add `noteUnknown` with its per-run dedup map, the
       new log wording, and the comment on why no mutex is needed; remove the old per-message
       `message from a chat outside the allowlist dropped` line
-- [ ] **call `noteUnknown` before the `convert` `!ok` guard** — see Technical Details; a group whose
+- [x] **call `noteUnknown` before the `convert` `!ok` guard** — see Technical Details; a group whose
       only update is the join event must still announce itself, or onboarding a quiet group breaks
-- [ ] write test: an unknown chat whose only update is a service message (a join event) still emits
+- [x] write test: an unknown chat whose only update is a service message (a join event) still emits
       the discovery log at Info, and writes to neither table
-- [ ] update `TestServiceFilters`: the `"chat outside allowlist dropped"` case becomes a buffered
+- [x] update `TestServiceFilters`: the `"chat outside allowlist dropped"` case becomes a buffered
       case — the table needs a way to express "expected in the pending batch, not the message
       batch" (a second want field, or a separate test), and the `assert.Empty(t, batches())` branch
       at `:186` must not swallow it
-- [ ] update `TestServiceFilteredBatchAdvancesOffset` (`:502`): the batch is now buffered, not
+- [x] update `TestServiceFilteredBatchAdvancesOffset` (`:502`): the batch is now buffered, not
       dropped — assert it lands in the pending batch while the offset still advances to 8
-- [ ] verify `TestServiceBatchIsOneTransaction` (`:243`) still passes: 2 messages stored, and now
+- [x] verify `TestServiceBatchIsOneTransaction` (`:243`) still passes: 2 messages stored, and now
       1 buffered
-- [ ] write test: a buffered message carries the chat title and type from the update
-- [ ] write test: a service message from an unknown chat is buffered nowhere
-- [ ] write test: a migrated chat still only warns and is neither stored nor buffered
-- [ ] write test: the unknown-chat log fires once for a batch of five messages from the same chat
-- [ ] write test: `skipPoison` routes a pending record to `UpsertPendingBatch` and a normal one to
+- [x] write test: a buffered message carries the chat title and type from the update
+- [x] write test: a service message from an unknown chat is buffered nowhere
+- [x] write test: a migrated chat still only warns and is neither stored nor buffered
+- [x] write test: the unknown-chat log fires once for a batch of five messages from the same chat
+- [x] write test: `skipPoison` routes a pending record to `UpsertPendingBatch` and a normal one to
       `UpsertBatch`
-- [ ] write test: a batch whose pending write fails keeps the offset pinned and retries
-- [ ] write **mixed-batch** tests — a batch carrying both kinds is the case the two-call split
+- [x] write test: a batch whose pending write fails keeps the offset pinned and retries
+- [x] write **mixed-batch** tests — a batch carrying both kinds is the case the two-call split
       actually changes, and the routing tests above do not cover it. Four cases:
       (1) pending succeeds, the messages write fails transiently, the retry succeeds;
       (2) pending succeeds, the messages write is poison, and the eventual singleton replay skips
@@ -472,7 +472,17 @@ Deliberately behaviour-free: the interface, the mock, and the split write path l
       must not reset just because the first of the two calls succeeded — resetting `storeFails`
       after every successful pending call would make it oscillate 0→1 forever and a consistently
       poisonous normal row would never reach `s.retries`
-- [ ] run `make test` — must pass before task 6
+- [x] run `make test` — must pass before task 6
+
+⚠️ `convert` takes the `*telegram.Message` rather than the update: `collect` has already picked it
+with `messageOf`, and passing the update back would reintroduce a nil check for a state that can no
+longer happen. `messageOf` is called in `collect` only.
+⚠️ "received unchanged across duplicate pending writes" cannot hold at the ingest layer — `persist`
+stamps `time.Now()` per call, so a redelivery carries a fresh one. Holding the clock is the store's
+`ON CONFLICT` clause, covered by `TestStore_UpsertPendingBatch`; the mixed-batch test asserts the
+stamp is taken once per batch and points at that test.
+➕ `TestServiceFilteredBatchAdvancesOffset` renamed to `TestServiceBufferedBatchAdvancesOffset` —
+the batch is no longer filtered.
 
 ### Task 6: Startup drain, sweep and summary
 
@@ -481,67 +491,84 @@ Deliberately behaviour-free: the interface, the mock, and the split write path l
 - Modify: `cmd/tg-mcp/main_test.go`
 - Modify: `README.md` (flag table only; the prose lands in task 10)
 
-- [ ] add the `PendingTTL` flag and reject a negative value in `validate()`
-- [ ] add `drainPending` doing replay, then sweep, then summary, with its three log lines
-- [ ] call it in `run()` right after `SyncChats`, before either goroutine starts, failure fatal
-- [ ] add `PENDING_TTL` to `clearEnv` (`main_test.go:325`) and cover the new flag in all three
+- [x] add the `PendingTTL` flag and reject a negative value in `validate()`
+- [x] add `drainPending` doing replay, then sweep, then summary, with its three log lines
+- [x] call it in `run()` right after `SyncChats`, before either goroutine starts, failure fatal
+- [x] add `PENDING_TTL` to `clearEnv` (`main_test.go:325`) and cover the new flag in all three
       `TestParseArgs` subtests (defaults, all flags set, env vars applied)
-- [ ] write test: `validate` rejects a negative `--pending-ttl`
-- [ ] write test: `drainPending` on a store with buffered rows for a now-allowlisted chat moves
+- [x] write test: `validate` rejects a negative `--pending-ttl`
+- [x] write test: `drainPending` on a store with buffered rows for a now-allowlisted chat moves
       them, and leaves an unknown chat's rows in place
-- [ ] write test: replay happens before the sweep — a buffered row older than the TTL belonging to
+- [x] write test: replay happens before the sweep — a buffered row older than the TTL belonging to
       a now-allowlisted chat is recovered, not deleted
-- [ ] run `make test` — must pass before task 7
+- [x] run `make test` — must pass before task 7
 
 ### Task 7: Make the e2e fake API forget confirmed updates
 
 **Files:**
 - Modify: `cmd/tg-mcp/e2e_test.go`
 
-- [ ] add a confirmed-offset high-water mark to `fakeAPI`, guarded by its existing `sync.Mutex`
-- [ ] in `serveUpdates`, raise the mark to `req.Offset` and serve only updates at or above it, so
+- [x] add a confirmed-offset high-water mark to `fakeAPI`, guarded by its existing `sync.Mutex`
+- [x] in `serveUpdates`, raise the mark to `req.Offset` and serve only updates at or above it, so
       an acknowledged update is never redelivered — modelling what Telegram actually does
-- [ ] expose a `confirmedOffset()` accessor guarded by the same mutex; task 8 needs it to know the
+- [x] expose a `confirmedOffset()` accessor guarded by the same mutex; task 8 needs it to know the
       first run really confirmed the batch
-- [ ] fix the now-half-false comment at `:174` — the non-allowlisted chat is buffered, not dropped;
+- [x] fix the now-half-false comment at `:174` — the non-allowlisted chat is buffered, not dropped;
       the assertion itself stays as is
-- [ ] run `make e2e` — `TestE2ESmoke` must still pass before task 8
+- [x] run `make e2e` — `TestE2ESmoke` must still pass before task 8
 
 ### Task 8: End-to-end restart replay test
 
 **Files:**
 - Modify: `cmd/tg-mcp/e2e_test.go`
 
-- [ ] add `TestE2EPendingReplay` as its own top-level test with its own fake API and data dir (the
+- [x] add `TestE2EPendingReplay` as its own top-level test with its own fake API and data dir (the
       smoke test defers `stopApp` at the top, so a restart cannot live inside it)
-- [ ] first `run()` with a `chats.yml` holding only `acme`; **gate the cancel on
+- [x] first `run()` with a `chats.yml` holding only `acme`; **gate the cancel on
       `require.Eventually(... api.confirmedOffset() >= 8 ...)`**, not on a tool result — the mark
       only rises on the *next* `getUpdates` after `offset = last + 1` (`ingest.go:157`), so
       cancelling on `list_new` alone leaves it at 0, the batch is redelivered, and the test passes
       with `drainPending` deleted
-- [ ] close the first MCP session, cancel the first app context, and **await its `done` channel with
+- [x] close the first MCP session, cancel the first app context, and **await its `done` channel with
       a bounded timeout and `require.NoError`** before starting the second run — `srv.Run` shuts the
       listener down on a goroutine (`pkg/server/server.go:147-161`), so reusing the same
       `opts.Listen` without that barrier can bind-fail intermittently or let the readiness probe
       answer from the old server. `cmd/tg-mcp/main_test.go:225-231` is the pattern to copy, and
       **both** runs need that cleanup on the failure path, not just the first
-- [ ] rewrite the same `chats.yml` path with `os.WriteFile` to add `e2eOtherChat` under a second
+- [x] rewrite the same `chats.yml` path with `os.WriteFile` to add `e2eOtherChat` under a second
       customer, then `run()` again on the same data dir and the same `opts.Listen`
-- [ ] open a fresh MCP session against the second run and assert `get_thread` for the new customer
+- [x] open a fresh MCP session against the second run and assert `get_thread` for the new customer
       returns the message dropped on the first run, and `list_new` surfaces it as untriaged
-- [ ] sanity-check the test fails when `drainPending` is stubbed out — if it still passes, the fake
+- [x] sanity-check the test fails when `drainPending` is stubbed out — if it still passes, the fake
       API is redelivering and task 7 is incomplete
-- [ ] run `make e2e` — must pass before task 9
+- [x] run `make e2e` — must pass before task 9
 
 ### Task 9: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented
-- [ ] verify edge cases: chat removed from the map after buffering, chat re-added after messages
-      already exist, buffered message edited before replay, poison pending row
-- [ ] run the full test suite: `make test`
-- [ ] run the e2e suite: `make e2e`
-- [ ] run `make lint` and `make fmt`
-- [ ] verify coverage did not regress
+- [x] verify all requirements from Overview are implemented — buffering (`UpsertPendingBatch`,
+      routed in `collect`), restart drain (`drainPending` before either goroutine starts), the
+      `WARN buffered chat not in the allowlist` line carrying id/title/type/count/oldest, and the
+      TTL sweep behind `--pending-ttl` (`336h` default, zero means the 14-day store default)
+- [x] verify edge cases: chat removed from the map after buffering
+      (`ReplayPending/only the given chats are moved` — rows for chats not passed in stay
+      buffered and keep showing up in `PendingChats`), chat re-added after messages already exist
+      (`ReplayPending/replaying into a chat that already has messages`), buffered message edited
+      before replay (`UpsertPendingBatch/edit refreshes the text and freezes the snapshot` plus
+      `ReplayPending/replaying over an existing message replaces its index row`), poison pending
+      row (`UpsertPendingBatch/row rejection is tagged`,
+      `TestServiceMixedBatch/poison buffered row skipped while the messages land`,
+      `TestServiceSkipPoisonRoutesEachRecordToItsTable`)
+- [x] run the full test suite: `make test` — all 7 packages pass
+- [x] run the e2e suite: `make e2e` — all pass, including `TestE2EPendingReplay`
+- [x] run `make lint` (0 issues) and `make fmt` (no changes)
+- [x] verify coverage did not regress — total 95.0% against 95.4% on `main`; `cmd/tg-mcp` rose
+      65.1% → 68.6% and `pkg/ingest` 98.5% → 98.7%, while `pkg/store` sits at 93.5% against 94.2%.
+      ➕ added the missing error-path subtests `pending.go` was short of the store convention:
+      closed-store cases for all four entry points, planted `not-a-time` in `received`, `sent` and
+      `edited_at`, and a `BEFORE DELETE` trigger proving a failed drop rolls the whole replay back.
+      What is left uncovered in `pending.go` is `tx.Commit`, `RowsAffected` and `rows.Err` guards —
+      the same class of line left uncovered in `store.go` on `main` (`upsertTx` 77.8%,
+      `UpsertBatch` 92.3%), unreachable without fault injection the codebase does not do
 
 ### Task 10: [Final] Update documentation
 
@@ -549,19 +576,19 @@ Deliberately behaviour-free: the interface, the mock, and the split write path l
 - Modify: `README.md`
 - Modify: `CLAUDE.md`
 
-- [ ] README: add `--pending-ttl` to the flag table
-- [ ] README: add an "adding a new group" note — the bot can be added before the chat map knows it;
+- [x] README: add `--pending-ttl` to the flag table
+- [x] README: add an "adding a new group" note — the bot can be added before the chat map knows it;
       the `WARN buffered chat not in the allowlist` line carries the id, title and type; add the
       entry and restart and the backlog replays
-- [ ] README: rewrite Bot setup step 4 (`:272-273`), which tells the operator to watch for
+- [x] README: rewrite Bot setup step 4 (`:272-273`), which tells the operator to watch for
       "the dropped-message lines" that no longer exist
-- [ ] README: update the chat map line reading "useful while collecting chat ids from the drop log"
+- [x] README: update the chat map line reading "useful while collecting chat ids from the drop log"
       (`:149`) and the `### Restarts` section, which currently states the loss is unrecoverable
-- [ ] CLAUDE.md: add the design-constraint bullet — separate table rather than a flag on `messages`
+- [x] CLAUDE.md: add the design-constraint bullet — separate table rather than a flag on `messages`
       (FTS indexes on write, the allowlist is a security boundary, nine query sites), replay before
       sweep, why converting at drop time is safe, and why there is no disable switch
-- [ ] CLAUDE.md: note `pending.go` in the `pkg/store` layout line
-- [ ] move this plan to `docs/plans/completed/`
+- [x] CLAUDE.md: note `pending.go` in the `pkg/store` layout line
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

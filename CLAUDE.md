@@ -9,8 +9,9 @@ server (streamable HTTP, bearer auth) lets Claude triage and reply. Single Go bi
 - `cmd/tg-mcp/e2e_test.go` — `//go:build e2e`, whole app in-process against a fake bot api
 - `pkg/config` — chat map (YAML): chat id → customer slug + optional label
 - `pkg/telegram` — minimal Bot API client (getMe, getUpdates, deleteWebhook, sendMessage, getFile, download)
-- `pkg/ingest` — long-poll loop, allowlist filter, store writes
-- `pkg/store` — SQLite (WAL): `store.go` schema/upsert/cursors/history, `thread.go`, `search.go`, `files.go` cache
+- `pkg/ingest` — long-poll loop, allowlist routing (messages table vs pending buffer), store writes
+- `pkg/store` — SQLite (WAL): `store.go` schema/upsert/cursors/history, `thread.go`, `search.go`,
+  `pending.go` buffer for chats outside the allowlist, `files.go` cache
 - `pkg/server` — `server.go` transport/auth/slug resolution, `tools.go` the 8 MCP tools,
   `files.go` attachments: inlining, thread images, link signing, `/files/`
 - `pkg/tghtml` — `Render`: markdown subset → Telegram HTML, hand-rolled scanner, no dependencies
@@ -61,6 +62,44 @@ These are decisions, not accidents — changing one needs a reason.
   (constraint, mismatch, too big, range). A database-wide failure — full disk, read-only mount,
   I/O error — is retried forever with the offset pinned, and it also aborts a replay already in
   progress: skipping cannot fix it, so losing the batch would be loss for nothing.
+- **messages from chats outside the allowlist are buffered, not dropped**, in a *separate*
+  `pending_messages` table — never a `pending` flag on `messages`. FTS5 is populated inside
+  `upsertTx` unconditionally, so a flagged-in-place design would leak non-allowlisted content
+  through `search` the moment one of the nine query sites over `messages`/`messages_fts` forgot
+  `AND pending = 0`; the allowlist is a security boundary, and a separate table makes that leak
+  unrepresentable rather than merely guarded. The table carries no `id` and no FTS row — the
+  surrogate key exists to *be* the FTS rowid — so `Pending.ID` is always 0 on read-back and a
+  replayed row gets its id from `upsertTx`. What is buffered is the *converted* `store.Message`,
+  not the raw update: `botID`/`botUsername` are fixed for the process run, so `IsMention` and
+  `repliesToBot` computed at drop time equal what a replay would compute. Only `group` and
+  `supergroup` are buffered (`bufferable`): a private chat never gets a `chats.yml` line, so
+  holding one would keep unsolicited DMs on disk for a replay that cannot come and hand anyone who
+  knows the bot username a way to grow the database. The drain is restart-only (`drainPending`,
+  before the goroutines start) — `chats.yml` is read once at startup, so a chat map edit already
+  means a restart, and no SIGHUP or watch is wanted. **Replay runs before the sweep**, so a chat the
+  map has just learned recovers its backlog instead of losing it to the sweep of the very startup
+  that was meant to replay it — including a backlog past the TTL that an outage kept the hourly
+  sweep from reaching, since sweeping first would delete exactly the rows the operator just asked
+  for. The TTL bounds what stays unclaimed, not what the chat map has learned. **A buffered row the
+  `messages` table refuses is dropped, not retried** (`replayChat`, gated on `store.ErrBadMessage`
+  exactly as `skipPoison` is, and extended to a row too corrupt to decode — `formatTime` has no
+  round-trip guarantee, a bot api `date` past year 9999 writes and then fails `parseTime`). Replay
+  runs before anything else starts, so aborting on one row is not a lost batch but a process that
+  cannot boot, and since an abort drops nothing every later start hits the same row: the failure
+  the offset-pinning rule accepts for ingest is a permanent outage here. Skipping needs no extra
+  delete — the chat-wide one takes the skipped rows with the rest — and each message replays inside
+  a savepoint, so a row refused midway through `upsertTx` cannot stay in `messages` with its FTS
+  entry deleted and not rewritten. A database-wide failure still aborts the chat and stays fatal.
+  For the same reason `PendingChats` reports a row whose `received` will not parse with a zero
+  timestamp instead of failing: the summary is a log line, and an error there would brick every
+  start over a row the sweep — which compares `received` as text — can never expire either.
+  The *sweep* alone also repeats hourly (`sweepPending`, `pendingSweepEvery`): it needs nothing
+  but the clock, and a startup-only one leaves `--pending-ttl` unenforced for the whole life of a
+  deployment that never restarts, so a group left talking after being taken out of the chat map
+  would buffer without bound. `--pending-ttl` has no off switch: zero means the default the way
+  `FileLinkTTL`'s does, and a `--no-pending` flag is a knob for a problem nobody has. The
+  unknown-chat line is logged once per process run (`seenUnknown`), not per message — the operator
+  needs the id once to write the `chats.yml` line.
 - **`ON CONFLICT ... DO UPDATE`, never `INSERT OR REPLACE`** — the latter changes the surrogate
   `id` (the FTS rowid) and skips triggers. Edits keep the original `sent` and set `edited_at`.
 - **FTS5 is standalone, not external-content**, and maintained explicitly in Go inside the same

@@ -20,10 +20,10 @@ import (
 	"github.com/alkk/tg-mcp/pkg/config"
 )
 
-// ErrBadMessage marks a write the database rejected because of the row itself — a constraint
-// violation, a type mismatch or an oversized value. Everything else (full disk, read-only mount,
-// I/O error) is a database-wide failure that dropping the message cannot fix, so callers must
-// keep retrying instead of skipping.
+// ErrBadMessage marks a single row the database will never accept — a constraint violation, a
+// type mismatch or an oversized value on write, a field too corrupt to decode on read back.
+// Everything else (full disk, read-only mount, I/O error) is a database-wide failure that dropping
+// the message cannot fix, so callers must keep retrying instead of skipping.
 var ErrBadMessage = errors.New("message rejected by the database")
 
 const dbFile = "tg-mcp.db"
@@ -124,6 +124,28 @@ CREATE TABLE IF NOT EXISTS cursors (
   last_triaged_message_id INTEGER NOT NULL
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(text);
+CREATE TABLE IF NOT EXISTS pending_messages (
+  chat_id        INTEGER NOT NULL,
+  message_id     INTEGER NOT NULL,
+  chat_title     TEXT    NOT NULL DEFAULT '',
+  chat_type      TEXT    NOT NULL DEFAULT '',
+  received       TEXT    NOT NULL,
+  thread_id      INTEGER,
+  sent           TEXT    NOT NULL,
+  sender_id      INTEGER NOT NULL DEFAULT 0,
+  sender_name    TEXT    NOT NULL,
+  from_bot       INTEGER NOT NULL DEFAULT 0,
+  reply_to       INTEGER,
+  text           TEXT    NOT NULL DEFAULT '',
+  is_mention     INTEGER NOT NULL DEFAULT 0,
+  edited_at      TEXT,
+  media_type     TEXT,
+  file_id        TEXT,
+  file_unique_id TEXT,
+  file_name      TEXT,
+  file_size      INTEGER,
+  PRIMARY KEY (chat_id, message_id)
+);
 `
 
 func (s *Store) migrate(ctx context.Context) error {

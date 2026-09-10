@@ -11,10 +11,11 @@ Single Go binary, no CGO. Chat ids never leave the server: every tool speaks in 
 ## What it does
 
 - **ingest** — long-polls `getUpdates`, keeps `message` and `edited_message` from allowlisted
-  chats only, drops everything else (with a log line naming the unknown chat id). Service
-  messages — joins, leaves, pins, title changes: no text and no attachment — are dropped too,
-  quietly at debug level. The update offset advances only after the batch is committed, so a
-  crash redelivers instead of losing messages.
+  chats only; a group the map does not know goes to a pending buffer instead (with a log line
+  naming its id), to be replayed once the map learns it. Service messages — joins, leaves, pins,
+  title changes: no text and no attachment — are dropped, quietly at debug level. The update
+  offset advances only after the batch is committed, so a crash redelivers instead of losing
+  messages.
 - **store** — SQLite in WAL mode, FTS5 full-text search, lazy on-disk cache for attachments.
 - **serve** — MCP over streamable HTTP at `/mcp`, `/ping` for health checks, and a
   `/files/<id>` endpoint for attachments that do not come back inline. That route takes either
@@ -114,6 +115,7 @@ Flags and environment variables are equivalent (`--telegram.token` == `TELEGRAM_
 | `--telegram.local` | `TELEGRAM_LOCAL` | `false` | API server runs with `--local`: `getFile` returns filesystem paths |
 | `--auth-token` | `AUTH_TOKEN` | — | bearer token for `/mcp` and `/files/`, and the secret download links are signed with; must be high-entropy random (required) |
 | `--file-link-ttl` | `FILE_LINK_TTL` | `5m` | lifetime of the download links `get_file` hands out |
+| `--pending-ttl` | `PENDING_TTL` | `336h` | how long messages from chats outside the allowlist are kept for replay |
 | `--listen` | `LISTEN` | `:8080` | http listen address |
 | `--data` | `DATA_DIR` | `./data` | data directory (SQLite db + file cache) |
 | `--chats` | `CHATS_FILE` | `chats.yml` | chat map file |
@@ -146,7 +148,47 @@ chats:
 ```
 
 Customer slugs must be non-empty and labels unique within a customer. An empty file is valid —
-useful while collecting chat ids from the drop log. Changes need a restart.
+useful while collecting chat ids, since everything that arrives meanwhile is buffered rather than
+lost. Changes need a restart.
+
+### Adding a new group
+
+The bot can be added to a group before the chat map knows about it. Messages from a chat outside
+the allowlist are not dropped — they go to a pending buffer, and ingest logs the chat once per run:
+
+```
+INFO buffering messages from a chat outside the allowlist chat_id=-1001234567890 title="Acme Ops" type=supergroup
+```
+
+Every restart also reports what is still waiting, with everything the `chats.yml` line needs:
+
+```
+WARN buffered chat not in the allowlist chat_id=-1001234567890 title="Acme Ops" type=supergroup messages=17 oldest=2026-09-01T08:12:44Z
+```
+
+Add the entry, restart, and the backlog is replayed into the customer's history
+(`INFO replayed buffered messages`). The replayed chat has no triage cursor yet, so the first
+`list_new` after the restart surfaces the whole recovered backlog.
+
+A buffered message the history table refuses is dropped rather than replayed, and named in a
+`WARN buffered messages dropped` line with its message ids. Keeping it would not save it: replay
+runs before the server and the poller start, so a message that fails every attempt would stop the
+process from starting at all, on this restart and every one after it.
+
+Buffered messages that nobody ever claims are swept once they are older than `--pending-ttl`
+(14 days by default): at startup, and hourly while the process runs. The TTL bounds what stays
+unclaimed — a chat still outside the allowlist ages out on the clock, whether or not the process is
+restarted in the meantime. Adding the chat wins over it: replay runs before the startup sweep, so a
+backlog is recovered rather than swept by the very startup that was meant to replay it, including
+one past the TTL that an outage kept the hourly sweep from reaching.
+
+Only groups and supergroups are buffered. A private chat is never a customer group, so a stranger
+messaging the bot directly is logged once (`INFO dropping messages from a chat outside the
+allowlist`) and nothing is kept.
+
+The buffer holds whatever any group the bot is in sends, not only the ones you mean to onboard. The
+tools never expose it — it lives in its own table, outside `search` and every other query — but it
+is on disk until it is replayed or swept, so `--pending-ttl` is the bound on it.
 
 ## Running
 
@@ -249,6 +291,11 @@ No update offset is stored on disk, by design. Telegram keeps unconfirmed update
 hours, so a restart re-receives whatever was not committed and the idempotent upserts absorb the
 duplicates. Downtime longer than that loses the messages in between — there is no backfill.
 
+A restart is also when the pending buffer is drained: chats the map has learned since are replayed
+into `messages`, whatever aged past `--pending-ttl` is swept, and the rest is logged as still
+waiting — see [Adding a new group](#adding-a-new-group). The sweep alone repeats hourly, so the TTL
+holds without a restart.
+
 The one deliberate loss path: if a batch still fails to store after three redeliveries, ingest
 retries it message by message and drops the ones the database itself rejects (a constraint
 violation, a type mismatch, an oversized value), so a single bad update cannot stall every chat.
@@ -269,8 +316,10 @@ instead of spinning.
 2. Disable privacy mode (`/setprivacy` → Disable) — otherwise the bot only sees messages that
    mention it. Making the bot a group admin has the same effect.
 3. Add the bot to each customer group.
-4. Start `tg-mcp` with an empty chat map and watch the log for the dropped-message lines naming
-   the unknown chat ids; put those ids in `chats.yml` and restart.
+4. Start `tg-mcp` with an empty chat map and watch the log for the
+   `buffering messages from a chat outside the allowlist` lines naming the chat ids; put those ids
+   in `chats.yml` and restart. Nothing said in the meantime is lost — see
+   [Adding a new group](#adding-a-new-group).
 
 Pointing the bot at a self-hosted `telegram-bot-api` requires calling `logOut` on the cloud API
 for that token first, otherwise the local server refuses to take over the bot.

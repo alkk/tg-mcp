@@ -35,6 +35,7 @@ type options struct {
 	Data        string        `long:"data" env:"DATA_DIR" default:"./data" description:"data directory for sqlite db and file cache"`
 	Chats       string        `long:"chats" env:"CHATS_FILE" default:"chats.yml" description:"chat map file"`
 	FileLinkTTL time.Duration `long:"file-link-ttl" env:"FILE_LINK_TTL" default:"5m" description:"lifetime of get_file download links"`
+	PendingTTL  time.Duration `long:"pending-ttl" env:"PENDING_TTL" default:"336h" description:"how long messages from chats outside the allowlist are kept for replay"`
 	Dbg         bool          `long:"dbg" env:"DEBUG" description:"debug logging"`
 }
 
@@ -95,6 +96,10 @@ func run(ctx context.Context, opts *options) error {
 		return fmt.Errorf("sync chats: %w", err)
 	}
 
+	if err = drainPending(ctx, st, chats.All(), opts.PendingTTL); err != nil {
+		return fmt.Errorf("drain buffered messages: %w", err)
+	}
+
 	tg := telegram.New(opts.Telegram.Token, opts.Telegram.APIURL, opts.Telegram.Local)
 	me, err := tg.GetMe(ctx)
 	if err != nil {
@@ -131,12 +136,16 @@ func run(ctx context.Context, opts *options) error {
 		return nil
 	})
 	grp.Go(func() error {
+		sweepPending(grpCtx, st, opts.PendingTTL, pendingSweepEvery)
+		return nil
+	})
+	grp.Go(func() error {
 		if rerr := srv.Run(grpCtx); rerr != nil {
 			return fmt.Errorf("mcp server: %w", rerr)
 		}
 		return nil
 	})
-	return grp.Wait() //nolint:wrapcheck // both goroutines wrap their own errors
+	return grp.Wait() //nolint:wrapcheck // the goroutines wrap their own errors
 }
 
 // validate catches the startup mistakes that would otherwise surface as confusing runtime errors.
@@ -148,8 +157,75 @@ func validate(opts *options) error {
 		return errors.New("mcp auth token is required (--auth-token, AUTH_TOKEN)")
 	case opts.FileLinkTTL < 0:
 		return errors.New("file link ttl cannot be negative (--file-link-ttl, FILE_LINK_TTL)")
+	case opts.PendingTTL < 0:
+		return errors.New("pending ttl cannot be negative (--pending-ttl, PENDING_TTL)")
 	}
 	return nil
+}
+
+// drainPending replays the messages buffered for chats the chat map now knows, drops what has
+// waited longer than ttl and reports the chats still missing from the map. Replay runs first, so
+// adding a chat wins over the TTL: its backlog is recovered instead of swept by the very startup
+// that was meant to replay it.
+func drainPending(ctx context.Context, st *store.Store, chats []config.Chat, ttl time.Duration) error {
+	replayed, err := st.ReplayPending(ctx, chats)
+	if err != nil {
+		return fmt.Errorf("replay: %w", err)
+	}
+	for _, r := range replayed {
+		slog.Info("replayed buffered messages", "customer", r.Customer, "chat_id", r.ChatID, "messages", r.Count)
+		if len(r.Dropped) > 0 {
+			slog.Warn("buffered messages dropped, the messages table refused them", "customer", r.Customer,
+				"chat_id", r.ChatID, "message_ids", r.Dropped)
+		}
+	}
+
+	swept, err := st.SweepPending(ctx, ttl)
+	if err != nil {
+		return fmt.Errorf("sweep: %w", err)
+	}
+	if swept > 0 {
+		slog.Info("expired buffered messages removed", "messages", swept, "ttl", ttl)
+	}
+
+	waiting, err := st.PendingChats(ctx)
+	if err != nil {
+		return fmt.Errorf("summarize: %w", err)
+	}
+	for _, c := range waiting {
+		slog.Warn("buffered chat not in the allowlist", "chat_id", c.ChatID, "title", c.Title,
+			"type", c.Type, "messages", c.Messages, "oldest", c.Oldest.Format(time.RFC3339))
+	}
+	return nil
+}
+
+// pendingSweepEvery is how often the TTL sweep runs while the process is up. The drain is
+// restart-only because it needs a re-read chats.yml; the sweep needs nothing but the clock, and a
+// startup-only one would leave --pending-ttl unenforced for the whole life of a deployment that
+// never restarts — a chat that keeps talking after being taken out of the chat map, or a stranger
+// who added the bot to a group, would buffer without bound.
+const pendingSweepEvery = time.Hour
+
+// sweepPending drops expired buffered messages until the context is canceled. A failing sweep is
+// logged and retried on the next tick: it is garbage collection, not something worth ending the
+// process over.
+func sweepPending(ctx context.Context, st *store.Store, ttl, every time.Duration) {
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			swept, err := st.SweepPending(ctx, ttl)
+			switch {
+			case err != nil && ctx.Err() == nil:
+				slog.Warn("sweep buffered messages", "err", err)
+			case err == nil && swept > 0:
+				slog.Info("expired buffered messages removed", "messages", swept, "ttl", ttl)
+			}
+		}
+	}
 }
 
 func setupLog(dbg bool) {
