@@ -100,7 +100,7 @@ func TestServePublic(t *testing.T) {
 
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 			assert.JSONEq(t, tt.want, rec.Body.String())
-			assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+			assert.Equal(t, "application/json; charset=utf-8", rec.Header().Get("Content-Type"))
 			assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
 			assert.Equal(t, "public, max-age=60", rec.Header().Get("Cache-Control"))
 			assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))

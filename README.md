@@ -239,8 +239,8 @@ group from a wrong url. An unknown name — a customer slug or a label included,
 — is a plain `404`, the same as any path that matches nothing, so the endpoint never hints that a
 chat without an alias exists. A widget hides the teaser on `null` and on any error alike.
 
-A `200` carries `Access-Control-Allow-Origin: *` (a simple GET, so there is no preflight to
-answer), `Cache-Control: public, max-age=60` for the proxy or CDN in front, and
+A `200` carries `Content-Type: application/json; charset=utf-8`, `Access-Control-Allow-Origin: *`
+(a simple GET, so there is no preflight to answer), `Cache-Control: public, max-age=60` for the proxy or CDN in front, and
 `X-Content-Type-Options: nosniff`; the `404` carries only `nosniff`, so a cross-origin widget
 sees it as a failed fetch. There is no rate limit — a request never touches the database: each
 public chat's newest message is loaded into memory at startup and updated as messages arrive, and

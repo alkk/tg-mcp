@@ -43,7 +43,7 @@ func (s *Server) servePublic(w http.ResponseWriter, r *http.Request) {
 		res.Message = publicView(msg, chat.Username)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Cache-Control", "public, max-age=60")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
