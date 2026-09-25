@@ -46,6 +46,9 @@ const (
 	e2ePendingTTL = 5 * time.Minute
 	// a chat nobody ever adds to the map: its buffer is what the sweep is measured on
 	e2eStrayChat = -1005555555555
+	// deliberately not the slug, so the slug answering 404 proves the alias is its own namespace
+	e2ePublicAlias = "acme-public"
+	e2eUsername    = "acme_support"
 )
 
 // e2eMessage mirrors the message view the tools hand out; the server-side type is unexported.
@@ -99,6 +102,19 @@ type e2eSendReply struct {
 	Warning string     `json:"warning"`
 }
 
+type e2ePublic struct {
+	Message *struct {
+		Sent   string `json:"sent"`
+		Sender string `json:"sender"`
+		Text   string `json:"text"`
+		Media  *struct {
+			Type     string `json:"type"`
+			FileName string `json:"file_name"`
+		} `json:"media"`
+		Link string `json:"link"`
+	} `json:"message"`
+}
+
 type e2eMarkHandled struct {
 	Customer   string `json:"customer"`
 	MarkedUpTo int64  `json:"marked_up_to"`
@@ -110,10 +126,11 @@ func TestE2ESmoke(t *testing.T) {
 	api := startFakeAPI(t)
 
 	opts := &options{
-		AuthToken:   e2eAuthToken,
-		Listen:      freeAddr(t),
-		Data:        t.TempDir(),
-		Chats:       writeChats(t, fmt.Sprintf("chats:\n  %d:\n    customer: acme\n", e2eChatID)),
+		AuthToken: e2eAuthToken,
+		Listen:    freeAddr(t),
+		Data:      t.TempDir(),
+		Chats: writeChats(t, fmt.Sprintf("chats:\n  %d:\n    customer: acme\n    public: %s\n    username: %s\n",
+			e2eChatID, e2ePublicAlias, e2eUsername)),
 		FileLinkTTL: e2eLinkTTL,
 	}
 	opts.Telegram.Token = e2eBotToken
@@ -148,6 +165,32 @@ func TestE2ESmoke(t *testing.T) {
 		return listErr == nil && len(listed.Messages) == 4
 	}, 15*time.Second, 50*time.Millisecond, "ingest did not store the scripted batch: %+v", listed)
 	require.NoError(t, listErr)
+
+	// before any send_reply, so the newest message is still the ingested photo
+	t.Run("the public endpoint serves the newest message without auth", func(t *testing.T) {
+		resp := fetch(ctx, t, baseURL+"/public/"+e2ePublicAlias, "")
+		require.Equal(t, http.StatusOK, resp.status, "body: %s", resp.body)
+		assert.Equal(t, "*", resp.header.Get("Access-Control-Allow-Origin"))
+
+		var res e2ePublic
+		require.NoError(t, json.Unmarshal(resp.body, &res))
+		require.NotNil(t, res.Message)
+		assert.Equal(t, "Jane Doe", res.Message.Sender)
+		assert.Equal(t, "and here is the console", res.Message.Text)
+		_, err := time.Parse(time.RFC3339, res.Message.Sent)
+		require.NoError(t, err)
+		assert.True(t, strings.HasSuffix(res.Message.Sent, "Z"), "sent is utc: %s", res.Message.Sent)
+		require.NotNil(t, res.Message.Media)
+		assert.Equal(t, "photo", res.Message.Media.Type)
+		assert.Empty(t, res.Message.Media.FileName, "a synthesized name would leak the file cache key")
+		assert.Equal(t, "https://t.me/"+e2eUsername+"/105", res.Message.Link)
+
+		assert.NotContains(t, string(resp.body), strings.TrimPrefix(strconv.FormatInt(e2eChatID, 10), "-"))
+		assert.NotContains(t, string(resp.body), "uniq-2")
+
+		slug := fetch(ctx, t, baseURL+"/public/acme", "")
+		assert.Equal(t, http.StatusNotFound, slug.status, "the customer slug is not a public alias")
+	})
 
 	t.Run("list_new shows the ingested messages", func(t *testing.T) {
 		ids := make([]int64, 0, len(listed.Messages))
@@ -215,6 +258,20 @@ func TestE2ESmoke(t *testing.T) {
 		assert.Equal(t, "HTML", sent[0]["parse_mode"])
 		assert.Equal(t, "looking into it: run <b><code>nxagentd -D6</code></b> &amp; "+
 			"please attach the agent log", sent[0]["text"])
+	})
+
+	t.Run("the public endpoint serves the bot reply once it is the newest", func(t *testing.T) {
+		resp := fetch(ctx, t, baseURL+"/public/"+e2ePublicAlias, "")
+		require.Equal(t, http.StatusOK, resp.status, "body: %s", resp.body)
+
+		var res e2ePublic
+		require.NoError(t, json.Unmarshal(resp.body, &res))
+		require.NotNil(t, res.Message)
+		assert.Equal(t, "@"+e2eBotName, res.Message.Sender)
+		assert.Equal(t, "looking into it: run nxagentd -D6 & please attach the agent log", res.Message.Text)
+		assert.Nil(t, res.Message.Media)
+		assert.Equal(t, "https://t.me/"+e2eUsername+"/"+strconv.FormatInt(reply.Message.MessageID, 10),
+			res.Message.Link)
 	})
 
 	t.Run("the sent reply shows up in the thread", func(t *testing.T) {
@@ -413,7 +470,7 @@ func TestE2EPendingReplay(t *testing.T) {
 	stopFirst()
 
 	require.NoError(t, os.WriteFile(chatsPath, []byte(fmt.Sprintf(
-		"chats:\n  %d:\n    customer: acme\n  %d:\n    customer: randoms\n",
+		"chats:\n  %d:\n    customer: acme\n  %d:\n    customer: randoms\n    public: randoms-public\n",
 		e2eChatID, e2eOtherChat)), 0o600))
 
 	// a chat that stays unknown, buffered longer ago than --pending-ttl but well inside every
@@ -440,6 +497,17 @@ func TestE2EPendingReplay(t *testing.T) {
 		require.Len(t, res.Messages, 1)
 		assert.Equal(t, int64(1), res.Messages[0].MessageID)
 		assert.Contains(t, res.Messages[0].Snippet, "who are you")
+	})
+
+	t.Run("the public endpoint serves the replayed message", func(t *testing.T) {
+		resp := fetch(ctx, t, baseURL+"/public/randoms-public", "")
+		require.Equal(t, http.StatusOK, resp.status, "body: %s", resp.body)
+
+		var res e2ePublic
+		require.NoError(t, json.Unmarshal(resp.body, &res))
+		require.NotNil(t, res.Message, "the cache is loaded after the replay")
+		assert.Equal(t, "who are you", res.Message.Text)
+		assert.Equal(t, "John", res.Message.Sender)
 	})
 
 	t.Run("the acme messages of the first run are untouched", func(t *testing.T) {

@@ -238,6 +238,37 @@ func TestMessageMedia(t *testing.T) {
 	}
 }
 
+func TestSynthesizedFileName(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  Message
+		want bool
+	}{
+		{name: "photo", msg: Message{Photo: []PhotoSize{{FileID: "p", FileUniqueID: "AgADvA"}}}, want: true},
+		{name: "nameless document", msg: Message{Document: &Document{FileID: "d", FileUniqueID: "AgADwB"}},
+			want: true},
+		{name: "nameless video", msg: Message{Video: &Video{FileID: "v", FileUniqueID: "AgADxC"}}, want: true},
+		{name: "video note", msg: Message{VideoNote: &VideoNote{FileID: "n", FileUniqueID: "AgADyD"}}, want: true},
+		{name: "voice", msg: Message{Voice: &Voice{FileID: "o", FileUniqueID: "AgADzE"}}, want: true},
+		{name: "sticker", msg: Message{Sticker: &Sticker{FileID: "s", FileUniqueID: "AgADaF", IsVideo: true}},
+			want: true},
+		{name: "named document", msg: Message{Document: &Document{FileID: "d", FileUniqueID: "AgADwB",
+			FileName: "server.log"}}},
+		{name: "named audio", msg: Message{Audio: &Audio{FileID: "a", FileUniqueID: "AgADbG",
+			FileName: "call.mp3"}}},
+		{name: "sender name starting with the id", msg: Message{Document: &Document{FileID: "d",
+			FileUniqueID: "AgADwB", FileName: "AgADwB-notes.txt"}}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			media, ok := tt.msg.Media()
+			require.True(t, ok)
+			assert.Equal(t, tt.want, SynthesizedFileName(media.FileName, media.FileUniqueID))
+		})
+	}
+}
+
 func TestMessageMentionsBot(t *testing.T) {
 	tests := []struct {
 		name string

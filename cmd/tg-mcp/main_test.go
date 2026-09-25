@@ -330,6 +330,42 @@ func TestDrainPending(t *testing.T) {
 	})
 }
 
+func TestTrackPublic(t *testing.T) {
+	ctx := context.Background()
+	logs := captureLogs(t)
+	st := newStore(t)
+	good := config.Chat{ID: -1001, ChatInfo: config.ChatInfo{Customer: "acme", Public: "acme-news"}}
+	broken := config.Chat{ID: -1002, ChatInfo: config.ChatInfo{Customer: "acme", Label: "ru", Public: "acme-ru"}}
+	private := config.Chat{ID: -1003, ChatInfo: config.ChatInfo{Customer: "acme", Label: "support"}}
+	require.NoError(t, st.UpsertBatch(ctx, []store.Message{
+		{ChatID: good.ID, MessageID: 1, Sent: time.Now(), SenderName: "alice", Text: "hello"},
+		// formatTime writes a year past 9999 that parseTime then refuses
+		{ChatID: broken.ID, MessageID: 1, Sent: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC), SenderName: "bob"},
+		{ChatID: private.ID, MessageID: 1, Sent: time.Now(), SenderName: "carol", Text: "internal"},
+	}))
+
+	trackPublic(ctx, st, []config.Chat{good, broken, private})
+
+	m, ok := st.Latest(good.ID)
+	require.True(t, ok)
+	assert.Equal(t, "hello", m.Text)
+	_, ok = st.Latest(private.ID)
+	assert.False(t, ok, "a chat without an alias is never cached")
+	_, ok = st.Latest(broken.ID)
+	assert.False(t, ok)
+
+	lines := logLines(logs(), "latest public message not loaded, it fills on the next message")
+	require.Len(t, lines, 1)
+	assert.Contains(t, lines[0], "public=acme-ru")
+	assert.Contains(t, lines[0], "chat_id=-1002")
+
+	require.NoError(t, st.UpsertMessage(ctx, store.Message{ChatID: broken.ID, MessageID: 2, Sent: time.Now(),
+		SenderName: "bob", Text: "recovered"}))
+	m, ok = st.Latest(broken.ID)
+	require.True(t, ok, "the broken chat stays tracked")
+	assert.Equal(t, "recovered", m.Text)
+}
+
 func TestSweepPendingKeepsRunning(t *testing.T) {
 	t.Run("expires what ages past the ttl without a restart", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -442,6 +478,41 @@ func TestRunServesAndShutsDown(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("run did not return after context cancellation")
 	}
+}
+
+func TestRunLoadsLatestPublicMessage(t *testing.T) {
+	opts := baseOptions(t)
+	opts.Listen = freeAddr(t)
+	opts.Chats = writeChats(t, "chats:\n  -1001:\n    customer: acme\n    public: acme-news\n")
+
+	st, err := store.New(opts.Data)
+	require.NoError(t, err)
+	require.NoError(t, st.UpsertBatch(t.Context(), []store.Message{
+		{ChatID: -1001, MessageID: 7, Sent: time.Now(), SenderName: "alice", Text: "newest"},
+		{ChatID: -1001, MessageID: 6, Sent: time.Now(), SenderName: "bob", Text: "older"},
+	}))
+	require.NoError(t, st.Close())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, opts) }()
+	defer func() {
+		cancel()
+		require.NoError(t, <-done)
+	}()
+
+	var body string
+	require.Eventually(t, func() bool {
+		resp, err := http.Get("http://" + opts.Listen + "/public/acme-news")
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		body = string(b)
+		return err == nil && resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 20*time.Millisecond, "server never came up")
+	assert.Contains(t, body, `"text":"newest"`)
 }
 
 func baseOptions(t *testing.T) *options {

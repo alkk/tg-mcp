@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"modernc.org/sqlite" // sqlite driver, no cgo
@@ -53,10 +54,15 @@ type Message struct {
 // HasMedia reports whether the message carries an attachment.
 func (m *Message) HasMedia() bool { return m.MediaType != "" }
 
-// Store owns the database handle and the data directory holding it and the file cache.
+// Store owns the database handle, the data directory holding it and the file cache, and the
+// newest message of each chat registered with TrackLatest.
 type Store struct {
 	db  *sql.DB
 	dir string
+
+	latestMu sync.RWMutex
+	tracked  map[int64]struct{}
+	latest   map[int64]Message
 }
 
 // New opens (creating it if needed) the database under dir and applies the schema.
@@ -72,7 +78,7 @@ func New(dir string) (*Store, error) {
 		return nil, fmt.Errorf("open database in %q: %w", dir, err)
 	}
 
-	s := &Store{db: db, dir: dir}
+	s := &Store{db: db, dir: dir, tracked: map[int64]struct{}{}, latest: map[int64]Message{}}
 	if err := s.migrate(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -202,6 +208,7 @@ func (s *Store) UpsertBatch(ctx context.Context, msgs []Message) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit messages: %w", err)
 	}
+	s.noteLatest(msgs)
 	return nil
 }
 

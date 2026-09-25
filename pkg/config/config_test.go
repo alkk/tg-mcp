@@ -62,6 +62,97 @@ chats:
 			},
 		},
 		{
+			name: "public alias and username round-trip",
+			yaml: `
+chats:
+  -1001:
+    customer: community
+    label: en
+    public: netxms-en
+    username: netxms_en
+  -1002:
+    customer: community
+    label: ru
+    public: 0netxms-ru
+  -1003:
+    customer: acme
+`,
+			want: map[int64]ChatInfo{
+				-1001: {Customer: "community", Label: "en", Public: "netxms-en", Username: "netxms_en"},
+				-1002: {Customer: "community", Label: "ru", Public: "0netxms-ru"},
+				-1003: {Customer: "acme"},
+			},
+		},
+		{
+			name: "four char username",
+			yaml: "chats:\n  -1001:\n    customer: acme\n    public: acme\n    username: abcd\n",
+			want: map[int64]ChatInfo{-1001: {Customer: "acme", Public: "acme", Username: "abcd"}},
+		},
+		{
+			name: "thirty-two char username",
+			yaml: "chats:\n  -1001:\n    customer: acme\n    public: acme\n    username: a1234567890123456789012345678901\n",
+			want: map[int64]ChatInfo{-1001: {Customer: "acme", Public: "acme",
+				Username: "a1234567890123456789012345678901"}},
+		},
+		{
+			name: "public alias shared by chats of two customers",
+			yaml: `
+chats:
+  -1001:
+    customer: acme
+    public: shared
+  -1002:
+    customer: globex
+    public: shared
+`,
+			wantErr: `public alias "shared" used by both chat -1002 and -1001`,
+		},
+		{
+			name:    "public alias with upper case",
+			yaml:    "chats:\n  -1001:\n    customer: acme\n    public: Netxms\n",
+			wantErr: `chat -1001: public alias "Netxms" must match`,
+		},
+		{
+			name:    "public alias with path traversal",
+			yaml:    "chats:\n  -1001:\n    customer: acme\n    public: ../x\n",
+			wantErr: `chat -1001: public alias "../x" must match`,
+		},
+		{
+			name:    "public alias with leading dash",
+			yaml:    "chats:\n  -1001:\n    customer: acme\n    public: -x\n",
+			wantErr: `chat -1001: public alias "-x" must match`,
+		},
+		{
+			name:    "public alias with underscore",
+			yaml:    "chats:\n  -1001:\n    customer: acme\n    public: a_b\n",
+			wantErr: `chat -1001: public alias "a_b" must match`,
+		},
+		{
+			name:    "username too short",
+			yaml:    "chats:\n  -1001:\n    customer: acme\n    public: acme\n    username: abc\n",
+			wantErr: `chat -1001: username "abc" must match`,
+		},
+		{
+			name:    "username too long",
+			yaml:    "chats:\n  -1001:\n    customer: acme\n    public: acme\n    username: a12345678901234567890123456789012\n",
+			wantErr: `chat -1001: username "a12345678901234567890123456789012" must match`,
+		},
+		{
+			name:    "username with leading digit",
+			yaml:    "chats:\n  -1001:\n    customer: acme\n    public: acme\n    username: 1netxms\n",
+			wantErr: `chat -1001: username "1netxms" must match`,
+		},
+		{
+			name:    "username with dash",
+			yaml:    "chats:\n  -1001:\n    customer: acme\n    public: acme\n    username: netxms-en\n",
+			wantErr: `chat -1001: username "netxms-en" must match`,
+		},
+		{
+			name:    "username without public alias",
+			yaml:    "chats:\n  -1001:\n    customer: acme\n    username: netxms_en\n",
+			wantErr: `chat -1001: username "netxms_en" set without a public alias`,
+		},
+		{
 			name: "empty customer slug",
 			yaml: `
 chats:
@@ -152,6 +243,12 @@ func TestLoad_exampleFile(t *testing.T) {
 	cfg, err := Load(filepath.Join("..", "..", "chats.example.yml"))
 	require.NoError(t, err)
 	assert.Equal(t, []string{"acme", "globex"}, cfg.Customers())
+
+	chat, ok := cfg.ByPublic("acme-support")
+	require.True(t, ok)
+	assert.Equal(t, int64(-1001234567890), chat.ID)
+	assert.Equal(t, "acme", chat.Customer)
+	assert.Equal(t, "acme_support", chat.Username)
 }
 
 func testConfig(t *testing.T) *Config {
@@ -183,6 +280,39 @@ func TestConfig_ByChat(t *testing.T) {
 			info, ok := cfg.ByChat(tt.chatID)
 			assert.Equal(t, tt.wantOK, ok)
 			assert.Equal(t, tt.want, info)
+		})
+	}
+}
+
+func TestConfig_ByPublic(t *testing.T) {
+	cfg := &Config{chats: map[int64]ChatInfo{
+		-1001: {Customer: "acme"},
+		-1002: {Customer: "community", Label: "en", Public: "netxms-en", Username: "netxms_en"},
+		-1003: {Customer: "community", Label: "ru"},
+	}}
+
+	tests := []struct {
+		name   string
+		alias  string
+		want   Chat
+		wantOK bool
+	}{
+		{
+			name:   "known alias",
+			alias:  "netxms-en",
+			want:   Chat{ID: -1002, ChatInfo: ChatInfo{Customer: "community", Label: "en", Public: "netxms-en", Username: "netxms_en"}},
+			wantOK: true,
+		},
+		{name: "unknown alias", alias: "netxms-ru"},
+		{name: "customer slug is not an alias", alias: "acme"},
+		{name: "empty name misses chats without an alias", alias: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chat, ok := cfg.ByPublic(tt.alias)
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.want, chat)
 		})
 	}
 }

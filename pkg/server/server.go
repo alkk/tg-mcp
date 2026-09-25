@@ -1,8 +1,9 @@
 // Package server exposes the message store to MCP clients: a streamable HTTP endpoint at /mcp
 // guarded by a static bearer token, a /files/ download route taking either that token or the
-// short-lived signature get_file mints into the url, plus an unauthenticated /ping health check.
-// Every tool addresses chats by customer slug and optional group label — raw telegram chat ids
-// never leave the process.
+// short-lived signature get_file mints into the url, plus an unauthenticated /ping health check
+// and an unauthenticated /public/{name} serving the newest message of a chat the chat map exposes
+// under a public alias. Every tool addresses chats by customer slug and optional group label — raw
+// telegram chat ids never leave the process.
 package server
 
 import (
@@ -41,6 +42,7 @@ type messageStore interface {
 	SetCursor(ctx context.Context, chatID, messageID int64) (int64, error)
 	SaveFile(fileUniqueID string, write func(w io.Writer) error) (string, error)
 	Cached(fileUniqueID string) (path string, ok bool)
+	Latest(chatID int64) (store.Message, bool)
 }
 
 // telegramAPI is the slice of the bot api the action tools need.
@@ -119,7 +121,8 @@ func New(p Params) (*Server, error) {
 }
 
 // Handler builds the HTTP routing: /mcp behind bearer auth, /files/ behind either the bearer
-// token or the signature get_file minted into the url, /ping open for health checks.
+// token or the signature get_file minted into the url, /ping open for health checks, /public/{name}
+// open for the chats the chat map gives a public alias.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ping", func(w http.ResponseWriter, _ *http.Request) {
@@ -129,6 +132,7 @@ func (s *Server) Handler() http.Handler {
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s.mcp }, nil)
 	mux.Handle("/mcp", s.auth(s.trackBase(mcpHandler)))
 	mux.Handle("GET "+filesRoute+"{id}", s.fileAuth(http.HandlerFunc(s.serveFile)))
+	mux.HandleFunc("GET /public/{name}", s.servePublic)
 	return mux
 }
 

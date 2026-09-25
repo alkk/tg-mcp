@@ -310,3 +310,9 @@ func fileName(name, uniqueID, ext string) string {
 	}
 	return uniqueID + ext
 }
+
+// SynthesizedFileName reports whether name is one Media made up for a nameless attachment rather
+// than one the sender gave. A sender's name that happens to start with the id counts as made up.
+func SynthesizedFileName(name, uniqueID string) bool {
+	return strings.HasPrefix(name, uniqueID)
+}

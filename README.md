@@ -20,6 +20,8 @@ Single Go binary, no CGO. Chat ids never leave the server: every tool speaks in 
 - **serve** — MCP over streamable HTTP at `/mcp`, `/ping` for health checks, and a
   `/files/<id>` endpoint for attachments that do not come back inline. That route takes either
   credential: the bearer token, or the short-lived signature `get_file` mints into the url.
+  Chats the map opts in also get an unauthenticated `/public/<name>` with their newest message,
+  for a website teaser — see [Public endpoint](#public-endpoint).
 
 Accepted Bot API constraints: no history backfill (logging starts when the bot joins),
 deletions are never delivered, and the cloud API caps `getFile` at 20 MB — a self-hosted
@@ -139,6 +141,8 @@ target through it. See `chats.example.yml`:
 chats:
   -1001234567890:
     customer: acme
+    public: acme-support   # optional: serve the newest message at /public/acme-support
+    username: acme_support # optional, needs public: the group's @username, for t.me links
   -1009876543210:
     customer: globex
     label: main          # required once a customer has more than one chat
@@ -147,7 +151,11 @@ chats:
     label: escalations
 ```
 
-Customer slugs must be non-empty and labels unique within a customer. An empty file is valid —
+Customer slugs must be non-empty and labels unique within a customer. A `public` alias is
+lowercase letters, digits and `-`, not starting with `-`, and unique across the whole map rather
+than per customer — the aliases are one url namespace. A `username` is the group's public
+@username without the `@`: a letter, then letters, digits and `_`, 4 to 32 characters. It only
+feeds the public link, so one set without `public` is rejected. An empty file is valid —
 useful while collecting chat ids, since everything that arrives meanwhile is buffered rather than
 lost. Changes need a restart.
 
@@ -189,6 +197,66 @@ allowlist`) and nothing is kept.
 The buffer holds whatever any group the bot is in sends, not only the ones you mean to onboard. The
 tools never expose it — it lives in its own table, outside `search` and every other query — but it
 is on disk until it is replayed or swept, so `--pending-ttl` is the bound on it.
+
+### Public endpoint
+
+`GET /public/<name>` returns the newest message of the chat whose `public` alias is `<name>`, with
+no credential at all — it exists for a website teaser that fetches straight from the browser. A chat
+without an alias has no public name, so it cannot be reached; exposure is opt-in per chat.
+
+```json
+{
+  "message": {
+    "sent": "2026-09-25T10:04:12Z",
+    "sender": "John D.",
+    "text": "has anyone tried 5.2 with ...",
+    "media": {"type": "document", "file_name": "netxmsd.log"},
+    "link": "https://t.me/acme_support/48213"
+  }
+}
+```
+
+- **`sent`** is UTC, RFC 3339. **`sender`** is the author's name as Telegram gives it: first and
+  last name, else `@username`, else `unknown`. Telegram fills in a placeholder author for posts
+  made on behalf of a chat, so an anonymous admin shows as `Group` and a linked channel's
+  auto-forward as `Telegram`. **`text`** is the message text or the attachment's caption, raw and
+  untruncated — trimming is the widget's job. Both are always present; a photo without a caption
+  has `"text": ""`.
+- **`media`** is there only for an attachment: `type` is `photo`, `document`, `video`,
+  `animation`, `audio`, `voice`, `video_note` or `sticker`, and `file_name` appears only when the
+  sender named the file. Everything nameless — every photo, voice note and sticker — is named
+  after its Telegram file unique id internally, the key of the private file cache, and that stays inside.
+  There is no download url: `/files/` stays authenticated.
+- **`link`** opens the message in Telegram and is there only when the chat has a `username`. A
+  private group has none, and the `t.me/c/...` form it would need carries the chat id.
+
+Nothing else leaves — no chat id, no sender id, no file ids, no reply chain. The bot's own replies
+are messages like any other, so an answer sent with `send_reply` is the newest one until somebody
+speaks.
+
+A known alias with nothing logged yet answers `{"message": null}`, so the widget can tell a quiet
+group from a wrong url. An unknown name — a customer slug or a label included, neither is an alias
+— is a plain `404`, the same as any path that matches nothing, so the endpoint never hints that a
+chat without an alias exists. A widget hides the teaser on `null` and on any error alike.
+
+A `200` carries `Access-Control-Allow-Origin: *` (a simple GET, so there is no preflight to
+answer), `Cache-Control: public, max-age=60` for the proxy or CDN in front, and
+`X-Content-Type-Options: nosniff`; the `404` carries only `nosniff`, so a cross-origin widget
+sees it as a failed fetch. There is no rate limit — a request never touches the database: each
+public chat's newest message is loaded into memory at startup and updated as messages arrive, and
+the proxy or CDN absorbs the rest. A row changed behind the server's back, with the `sqlite3` CLI
+say, is not seen until the next restart reloads it.
+
+**`text`, `sender` and `media.file_name` are untrusted customer input**, and plain text, not HTML:
+anyone in the group can put `<script>` in a message, in their name or in the name of a file they
+send. Insert them with `textContent`, never
+`innerHTML`. The JSON happens to escape `<`, `>` and `&` as `\u003c`-style sequences, but every
+JSON parser decodes them back, so that protects nothing once the body is parsed.
+
+Deletions are not reflected. The Bot API never delivers them, so a message the admins remove —
+spam, typically — stays the newest one until the next message arrives, plus up to a minute of
+cache. Hiding new senders instead would hide a genuine newcomer's first question too, and put a
+moderation policy into a server that is otherwise dumb, so the gap is accepted.
 
 ## Running
 
@@ -266,6 +334,12 @@ The trailing slash on `proxy_pass` strips the prefix, so `/tg-mcp/mcp` reaches `
 `https://tg.example.com/tg-mcp/mcp`. `/ping` follows the prefix too
 (`https://tg.example.com/tg-mcp/ping`) — it stays unauthenticated, so keep it off the public
 listener if that matters.
+
+`/public/<name>` is unauthenticated like `/ping` and follows the prefix the same way
+(`https://tg.example.com/tg-mcp/public/acme-support`). Unlike `/ping` it is meant to be reached:
+forward it on the hostname the website calls, and leave `Access-Control-Allow-Origin` as it comes
+back — a proxy that strips or overrides it makes every browser fetch fail while `curl` still works.
+Its `Cache-Control` is `public`, so a caching proxy or CDN may hold the answer for up to a minute.
 
 `/mcp` sits behind the bearer token and `/files/` takes either that token or the signature in the
 url; the proxy does not need to add anything, but it must pass the `Authorization` header through

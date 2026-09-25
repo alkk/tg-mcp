@@ -12,13 +12,22 @@
 # "buffering messages from a chat outside the allowlist" line naming it. Messages sent before
 # the id lands here are not lost — they are buffered and replayed on the next restart.
 #
+# public is optional and exposes the chat's newest message, unauthenticated, at
+# /public/<alias> — for a website teaser. A chat without it cannot be reached there. Aliases
+# are lowercase letters, digits and '-', unique across the whole file, and a namespace of their
+# own, so the website never has to learn a customer slug. username is the group's public
+# @username (without '@'); it adds a t.me link to that message and requires public. Leave it out
+# for a private group.
+#
 # Note: when a basic group is upgraded to a supergroup its chat id changes. tg-mcp logs the
 # migration with old and new id — update this file and restart.
 
 chats:
-  # single-group customer, no label needed
+  # single-group customer, no label needed; a public community group, so exposed
   -1001234567890:
     customer: acme
+    public: acme-support
+    username: acme_support
 
   # multi-group customer, every chat labelled
   -1009876543210:

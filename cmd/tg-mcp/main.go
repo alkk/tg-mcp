@@ -100,6 +100,8 @@ func run(ctx context.Context, opts *options) error {
 		return fmt.Errorf("drain buffered messages: %w", err)
 	}
 
+	trackPublic(ctx, st, chats.All())
+
 	tg := telegram.New(opts.Telegram.Token, opts.Telegram.APIURL, opts.Telegram.Local)
 	me, err := tg.GetMe(ctx)
 	if err != nil {
@@ -161,6 +163,21 @@ func validate(opts *options) error {
 		return errors.New("pending ttl cannot be negative (--pending-ttl, PENDING_TTL)")
 	}
 	return nil
+}
+
+// trackPublic loads the newest message of every public chat. A chat whose newest row will not load
+// is logged and left empty rather than failing startup: the row would still be there on the next
+// boot, so an error here would brick every start over a decorative ticker.
+func trackPublic(ctx context.Context, st *store.Store, chats []config.Chat) {
+	for _, c := range chats {
+		if c.Public == "" {
+			continue
+		}
+		if err := st.TrackLatest(ctx, c.ID); err != nil {
+			slog.Warn("latest public message not loaded, it fills on the next message", "err", err,
+				"public", c.Public, "customer", c.Customer, "label", c.Label, "chat_id", c.ID)
+		}
+	}
 }
 
 // drainPending replays the messages buffered for chats the chat map now knows, drops what has

@@ -24,6 +24,9 @@ import (
 //			HistoryFunc: func(ctx context.Context, chatIDs []int64, from time.Time, to time.Time, before *store.HistoryCursor, limit int) ([]store.Message, error) {
 //				panic("mock out the History method")
 //			},
+//			LatestFunc: func(chatID int64) (store.Message, bool) {
+//				panic("mock out the Latest method")
+//			},
 //			ListNewFunc: func(ctx context.Context, chatIDs []int64, limit int) ([]store.Message, error) {
 //				panic("mock out the ListNew method")
 //			},
@@ -60,6 +63,9 @@ type MessageStore struct {
 
 	// HistoryFunc mocks the History method.
 	HistoryFunc func(ctx context.Context, chatIDs []int64, from time.Time, to time.Time, before *store.HistoryCursor, limit int) ([]store.Message, error)
+
+	// LatestFunc mocks the Latest method.
+	LatestFunc func(chatID int64) (store.Message, bool)
 
 	// ListNewFunc mocks the ListNew method.
 	ListNewFunc func(ctx context.Context, chatIDs []int64, limit int) ([]store.Message, error)
@@ -106,6 +112,11 @@ type MessageStore struct {
 			Before *store.HistoryCursor
 			// Limit is the limit argument value.
 			Limit int
+		}
+		// Latest holds details about calls to the Latest method.
+		Latest []struct {
+			// ChatID is the chatID argument value.
+			ChatID int64
 		}
 		// ListNew holds details about calls to the ListNew method.
 		ListNew []struct {
@@ -182,6 +193,7 @@ type MessageStore struct {
 	}
 	lockCached        sync.RWMutex
 	lockHistory       sync.RWMutex
+	lockLatest        sync.RWMutex
 	lockListNew       sync.RWMutex
 	lockMessageByID   sync.RWMutex
 	lockSaveFile      sync.RWMutex
@@ -273,6 +285,38 @@ func (mock *MessageStore) HistoryCalls() []struct {
 	mock.lockHistory.RLock()
 	calls = mock.calls.History
 	mock.lockHistory.RUnlock()
+	return calls
+}
+
+// Latest calls LatestFunc.
+func (mock *MessageStore) Latest(chatID int64) (store.Message, bool) {
+	if mock.LatestFunc == nil {
+		panic("MessageStore.LatestFunc: method is nil but messageStore.Latest was just called")
+	}
+	callInfo := struct {
+		ChatID int64
+	}{
+		ChatID: chatID,
+	}
+	mock.lockLatest.Lock()
+	mock.calls.Latest = append(mock.calls.Latest, callInfo)
+	mock.lockLatest.Unlock()
+	return mock.LatestFunc(chatID)
+}
+
+// LatestCalls gets all the calls that were made to Latest.
+// Check the length with:
+//
+//	len(mockedmessageStore.LatestCalls())
+func (mock *MessageStore) LatestCalls() []struct {
+	ChatID int64
+} {
+	var calls []struct {
+		ChatID int64
+	}
+	mock.lockLatest.RLock()
+	calls = mock.calls.Latest
+	mock.lockLatest.RUnlock()
 	return calls
 }
 

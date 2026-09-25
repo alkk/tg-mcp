@@ -108,21 +108,21 @@
 - Modify: `pkg/store/store.go`
 - Create: `pkg/store/latest_test.go`
 
-- [ ] add `latestMu`, `tracked`, `latest` to `Store` and initialize the maps in `New`
-- [ ] implement `TrackLatest`, `Latest`, `noteLatest` in `pkg/store/latest.go`
-- [ ] call `s.noteLatest(msgs)` in `UpsertBatch` after a successful commit
-- [ ] write tests for `TrackLatest`: picks the highest `message_id` per chat across several chats;
+- [x] add `latestMu`, `tracked`, `latest` to `Store` and initialize the maps in `New`
+- [x] implement `TrackLatest`, `Latest`, `noteLatest` in `pkg/store/latest.go`
+- [x] call `s.noteLatest(msgs)` in `UpsertBatch` after a successful commit
+- [x] write tests for `TrackLatest`: picks the highest `message_id` per chat across several chats;
       a tracked chat with no rows returns `false`, and its first upserted message then fills it
-- [ ] write test: ids 11 then 10 upserted with the same `Sent`, then a fresh `TrackLatest` (the
+- [x] write test: ids 11 then 10 upserted with the same `Sent`, then a fresh `TrackLatest` (the
       restart) still returns 11, the same as the live cache did
-- [ ] write test: an edit of the cached message with a moved `Sent` updates the text and keeps the
+- [x] write test: an edit of the cached message with a moved `Sent` updates the text and keeps the
       original `Sent`, matching `MessageByID`
-- [ ] write tests for `noteLatest` via `UpsertBatch`/`UpsertMessage` (table-driven): an untracked
+- [x] write tests for `noteLatest` via `UpsertBatch`/`UpsertMessage` (table-driven): an untracked
       chat is never cached; a higher id replaces; a lower id is ignored; the same id (an edit)
       replaces; `UpsertMessage` updates the cache
-- [ ] write test: a batch failing with `ErrBadMessage` (e.g. a valid message followed by one that
+- [x] write test: a batch failing with `ErrBadMessage` (e.g. a valid message followed by one that
       violates a constraint) leaves the cache untouched, including for the valid one
-- [ ] run `make test` - must pass before task 2
+- [x] run `make test` - must pass before task 2
 
 ### Task 2: Serve /public/{name} from the cache
 
@@ -132,14 +132,16 @@
 - Modify: `pkg/server/public.go`
 - Modify: `pkg/server/public_test.go`
 
-- [ ] add `Latest(chatID int64) (store.Message, bool)` to `messageStore` and regenerate the mock
-- [ ] rewrite `servePublic` to use `s.store.Latest`; drop the `History` call, the
+- [x] add `Latest(chatID int64) (store.Message, bool)` to `messageStore` and regenerate the mock
+- [x] rewrite `servePublic` to use `s.store.Latest`; drop the `History` call, the
       `context.Canceled` branch and the 500 path
-- [ ] update `TestServePublic` to drive `LatestFunc` and assert `HistoryCalls()` is empty
-- [ ] update `TestServePublicErrors`: unknown alias → 404 with neither `Latest` nor `History`
+- [x] update `TestServePublic` to drive `LatestFunc` and assert `HistoryCalls()` is empty
+- [x] update `TestServePublicErrors`: unknown alias → 404 with neither `Latest` nor `History`
       called; drop the store-error case
-- [ ] remove `TestServePublicClientGone` (no store call left to cancel)
-- [ ] run `make test` - must pass before task 3
+- [x] remove `TestServePublicClientGone` (no store call left to cancel)
+- [x] ➕ drop `captureLogs`/`logLines` from `server_test.go`: the removed public error cases were
+      their last users
+- [x] run `make test` - must pass before task 3
 
 ### Task 3: Load the cache at startup
 
@@ -148,35 +150,38 @@
 - Modify: `cmd/tg-mcp/main_test.go`
 - Modify: `cmd/tg-mcp/e2e_test.go`
 
-- [ ] in `run()`, after `drainPending`, call `st.TrackLatest` with the ids of chats whose `Public`
+- [x] in `run()`, after `drainPending`, call `st.TrackLatest` with the ids of chats whose `Public`
       is set; wrap the error as `load latest public messages: %w`
-- [ ] extend `TestRunServesAndShutsDown` (or add a focused test) so a public chat seeded with a
+- [x] extend `TestRunServesAndShutsDown` (or add a focused test) so a public chat seeded with a
       message before `run()` answers `/public/<alias>` with it: the startup load path
-- [ ] extend `TestE2EPendingReplay` so the replayed chat carries a `public` alias and
+- [x] extend `TestE2EPendingReplay` so the replayed chat carries a `public` alias and
       `/public/<alias>` serves the replayed newest message. This checks that `TrackLatest` runs after
       `drainPending`
-- [ ] confirm `TestE2ESmoke`'s existing "serves the newest message" and "serves the bot reply once
+- [x] confirm `TestE2ESmoke`'s existing "serves the newest message" and "serves the bot reply once
       it is the newest" cases pass unchanged (the live update path from ingest and `send_reply`)
-- [ ] run `make test` and `make e2e` - must pass before task 4
+- [x] run `make test` and `make e2e` - must pass before task 4
 
 ### Task 4: Verify acceptance criteria
-- [ ] verify `servePublic` no longer calls into SQLite (`grep` for `History` in `public.go`)
-- [ ] verify edge cases: edit of newest, edit of older, rolled-back batch, untracked chat
-- [ ] run full test suite: `make test`
-- [ ] run e2e tests: `make e2e`
-- [ ] run `make lint`
-- [ ] verify coverage of `pkg/store/latest.go` is complete
+- [x] verify `servePublic` no longer calls into SQLite (`grep` for `History` in `public.go`)
+- [x] verify edge cases: edit of newest, edit of older, rolled-back batch, untracked chat
+- [x] ➕ add an "edit of an older message" row to `TestStore_NoteLatest`: "lower id is ignored"
+      wrote an id never stored, a late arrival rather than an edit
+- [x] run full test suite: `make test`
+- [x] run e2e tests: `make e2e`
+- [x] run `make lint`
+- [x] verify coverage of `pkg/store/latest.go` is complete
 
 ### Task 5: [Final] Update documentation
-- [ ] README "Public endpoint": drop "A store failure is a bare `500`…" and the `500` in the
+- [x] README "Public endpoint": drop "A store failure is a bare `500`…" and the `500` in the
       headers sentence; replace "a request is one indexed single-row lookup" with an in-memory
       lookup, loaded at startup and updated as messages arrive
-- [ ] CLAUDE.md `/public/{name}` bullet: replace "a store error is a bare 500 with the detail in
+- [x] ➕ README: a row changed out-of-band (sqlite3 CLI) stays stale until a restart reloads it
+- [x] CLAUDE.md `/public/{name}` bullet: replace "a store error is a bare 500 with the detail in
       the log only" with the cache rule (loaded after `drainPending`, updated in `UpsertBatch`
       after commit, max by `message_id`, the endpoint never touches SQLite)
-- [ ] CLAUDE.md layout: add `latest.go` to the `pkg/store` line
-- [ ] leave `docs/plans/completed/20260925-public-latest-message.md` untouched
-- [ ] move this plan to `docs/plans/completed/`
+- [x] CLAUDE.md layout: add `latest.go` to the `pkg/store` line
+- [x] leave `docs/plans/completed/20260925-public-latest-message.md` untouched
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*

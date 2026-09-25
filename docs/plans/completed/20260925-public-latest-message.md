@@ -167,19 +167,19 @@ Flow of `servePublic`:
 - Modify: `pkg/config/config.go`
 - Modify: `pkg/config/config_test.go`
 
-- [ ] add `Public` and `Username` to `ChatInfo` with yaml tags `public` / `username`
-- [ ] extend `validate()`: alias pattern, alias uniqueness across the whole map (track
+- [x] add `Public` and `Username` to `ChatInfo` with yaml tags `public` / `username`
+- [x] extend `validate()`: alias pattern, alias uniqueness across the whole map (track
   `map[string]int64` alias → chat id, error names both chats), username pattern, username without
   public rejected; compile both regexps once at package level
-- [ ] add `ByPublic(name string) (Chat, bool)`, empty name never matches
-- [ ] write `TestLoad` cases for success: both fields round-trip, `public` without `username`,
+- [x] add `ByPublic(name string) (Chat, bool)`, empty name never matches
+- [x] write `TestLoad` cases for success: both fields round-trip, `public` without `username`,
   existing files without the fields load unchanged
-- [ ] write `TestLoad` cases for errors: one alias on chats of two different customers; bad aliases
+- [x] write `TestLoad` cases for errors: one alias on chats of two different customers; bad aliases
   `Netxms`, `../x`, `-x`, `a_b`; bad usernames `abc` (too short), `1netxms` (leading digit),
   `netxms-en` (contains `-`); `username` without `public`
-- [ ] write `TestConfig_ByPublic`: hit returns the chat with id, miss, empty name misses even when
+- [x] write `TestConfig_ByPublic`: hit returns the chat with id, miss, empty name misses even when
   chats without an alias exist
-- [ ] run `make test` - must pass before task 2
+- [x] run `make test` - must pass before task 2
 
 ### Task 2: Serve `GET /public/{name}`
 
@@ -188,48 +188,48 @@ Flow of `servePublic`:
 - Create: `pkg/server/public_test.go`
 - Modify: `pkg/server/server.go`
 
-- [ ] create `public.go` with the response structs (`publicResult{Message *publicMessage}`,
+- [x] create `public.go` with the response structs (`publicResult{Message *publicMessage}`,
   `publicMessage`, `publicMedia`) and `servePublic` following the flow in Technical Details
-- [ ] set the four response headers; build `link` only when `chat.Username != ""`; set
+- [x] set the four response headers; build `link` only when `chat.Username != ""`; set
   `file_name` only when `!strings.HasPrefix(m.FileName, m.FileUniqueID)`
-- [ ] register `mux.HandleFunc("GET /public/{name}", s.servePublic)` in `Handler()`, outside `auth`,
+- [x] register `mux.HandleFunc("GET /public/{name}", s.servePublic)` in `Handler()`, outside `auth`,
   and add the route to the package doc and the `Handler` doc comment
-- [ ] write table-driven `TestServePublic` success cases: full JSON of a text message with link;
+- [x] write table-driven `TestServePublic` success cases: full JSON of a text message with link;
   no `link` without username; a document with a real `file_name`; a photo whose `FileName` is
   `FileUniqueID+".jpg"` and a document falling back to `FileUniqueID` — both carry `media.type`
   only and the body contains no file unique id; `Text` with `<script>&` decodes back unchanged
   (no HTML processing server-side); empty chat →
   `{"message":null}`; headers asserted; no `Authorization` header sent; the mock asserts `History`
   got exactly `[]int64{chatID}`, zero bounds, nil cursor and limit 1
-- [ ] write error cases: unknown alias → 404 and `History` never called; an allowlisted chat
+- [x] write error cases: unknown alias → 404 and `History` never called; an allowlisted chat
   without `public` unreachable under its customer slug and its label; store error → 500 whose body
   does not contain the error text
-- [ ] assert no response body contains the chat id
-- [ ] run `make test` and `make lint` - must pass before task 3
+- [x] assert no response body contains the chat id
+- [x] run `make test` and `make lint` - must pass before task 3
 
 ### Task 3: Cover the endpoint end to end
 
 **Files:**
 - Modify: `cmd/tg-mcp/e2e_test.go`
 
-- [ ] give the `acme` chat in `TestE2ESmoke` `public: acme-public` — deliberately not the slug, so
+- [x] give the `acme` chat in `TestE2ESmoke` `public: acme-public` — deliberately not the slug, so
   the 404 below proves something — and a `username`
-- [ ] add a subtest right after the ingest `Eventually`, before any `send_reply` subtest: `GET
+- [x] add a subtest right after the ingest `Eventually`, before any `send_reply` subtest: `GET
   /public/acme-public` without auth returns message 105 as a photo with the expected `t.me` link
   and no `file_name`
-- [ ] assert the raw body contains neither the chat id (`1001234567890`) nor the photo's file unique
+- [x] assert the raw body contains neither the chat id (`1001234567890`) nor the photo's file unique
   id (`uniq-2`) — the only place the real encoding of a real ingested row is checked
-- [ ] in the same subtest, `GET /public/acme` (the slug, not an alias) is 404
-- [ ] run `make e2e` - must pass before task 4
+- [x] in the same subtest, `GET /public/acme` (the slug, not an alias) is 404
+- [x] run `make e2e` - must pass before task 4
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented
-- [ ] verify edge cases: empty chat, missing username, store failure, chat without alias
-- [ ] run full test suite: `make test`
-- [ ] run e2e tests: `make e2e`
-- [ ] run `make lint`
-- [ ] verify coverage of `public.go` and the new `config.go` branches is complete
+- [x] verify all requirements from Overview are implemented
+- [x] verify edge cases: empty chat, missing username, store failure, chat without alias
+- [x] run full test suite: `make test`
+- [x] run e2e tests: `make e2e`
+- [x] run `make lint`
+- [x] verify coverage of `public.go` and the new `config.go` branches is complete
 
 ### Task 5: [Final] Update documentation
 
@@ -239,24 +239,24 @@ Flow of `servePublic`:
 - Modify: `pkg/config/config.go`
 - Modify: `CLAUDE.md`
 
-- [ ] README `### Chat map`: the two fields and their validation
-- [ ] README: a `### Public endpoint` section with the url, the JSON, the headers, `{"message":
+- [x] README `### Chat map`: the two fields and their validation
+- [x] README: a `### Public endpoint` section with the url, the JSON, the headers, `{"message":
   null}` vs 404, the warning that `text` is untrusted customer input to insert via `textContent`
   never `innerHTML`, and the deletion limitation
-- [ ] README `### Behind a reverse proxy`: `/public/` is unauthenticated like `/ping`, and follows
+- [x] README `### Behind a reverse proxy`: `/public/` is unauthenticated like `/ping`, and follows
   the prefix mount
-- [ ] `chats.example.yml`: add `public:` and `username:` *uncommented* to the existing `acme`
+- [x] `chats.example.yml`: add `public:` and `username:` *uncommented* to the existing `acme`
   entry, with a comment explaining them — `TestLoad_exampleFile` loads that file, so the example is
   validated rather than decorative (and it asserts `Customers() == [acme, globex]`, so no new
   customer)
-- [ ] `pkg/config/config.go` package doc: chats also resolve to an optional public alias
-- [ ] CLAUDE.md: layout entry for `pkg/server/public.go`; extend the "chat ids never leave the
+- [x] `pkg/config/config.go` package doc: chats also resolve to an optional public alias
+- [x] CLAUDE.md: layout entry for `pkg/server/public.go`; extend the "chat ids never leave the
   server" bullet — `ByPublic` is a third resolution path next to `chatIDs`/`singleChat`; a new
   design-constraint bullet recording opt-in by alias, global alias namespace, opaque 404/500, no
   chat id, synthesized file names withheld, raw text with escaping as the consumer's job, deletions
   accepted and why sender filtering was rejected
-- [ ] run `make test` — the example file is under test
-- [ ] move this plan to `docs/plans/completed/`
+- [x] run `make test` — the example file is under test
+- [x] move this plan to `docs/plans/completed/` (deferred to orchestrator completion step)
 
 ## Post-Completion
 

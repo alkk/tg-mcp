@@ -1,19 +1,22 @@
 # tg-mcp
 
 Telegram support gateway: a Bot API bot logs allowlisted customer groups into SQLite, and an MCP
-server (streamable HTTP, bearer auth) lets Claude triage and reply. Single Go binary, no CGO.
+server (streamable HTTP, bearer auth) lets Claude triage and reply, plus an opt-in, unauthenticated
+`/public/{name}` serving a chat's newest message to a website widget. Single Go binary, no CGO.
 
 ## Layout
 
 - `cmd/tg-mcp/main.go` — entrypoint, `options` (go-flags), `run()` composition root
 - `cmd/tg-mcp/e2e_test.go` — `//go:build e2e`, whole app in-process against a fake bot api
-- `pkg/config` — chat map (YAML): chat id → customer slug + optional label
+- `pkg/config` — chat map (YAML): chat id → customer slug + optional label, public alias, username
 - `pkg/telegram` — minimal Bot API client (getMe, getUpdates, deleteWebhook, sendMessage, getFile, download)
 - `pkg/ingest` — long-poll loop, allowlist routing (messages table vs pending buffer), store writes
 - `pkg/store` — SQLite (WAL): `store.go` schema/upsert/cursors/history, `thread.go`, `search.go`,
-  `pending.go` buffer for chats outside the allowlist, `files.go` cache
+  `pending.go` buffer for chats outside the allowlist, `files.go` cache, `latest.go` newest
+  message of each public chat, held in memory
 - `pkg/server` — `server.go` transport/auth/slug resolution, `tools.go` the 8 MCP tools,
-  `files.go` attachments: inlining, thread images, link signing, `/files/`
+  `files.go` attachments: inlining, thread images, link signing, `/files/`, `public.go` the
+  unauthenticated `/public/{name}` latest-message endpoint
 - `pkg/tghtml` — `Render`: markdown subset → Telegram HTML, hand-rolled scanner, no dependencies
 - `Dockerfile` / `docker-compose.yml` / `init.sh` — multi-stage build on `ghcr.io/alkk/baseimage`;
   the image presets `DATA_DIR=/srv/data`, `CHATS_FILE=/srv/chats.yml`, `LISTEN=:8080` on top of the
@@ -50,7 +53,8 @@ These are decisions, not accidents — changing one needs a reason.
   no result struct carries a chat id, and neither does any error text — store errors reach the
   client verbatim, so they name message ids only and callers log the chat id themselves. The chat
   map is the allowlist in both directions: ingest filters on it, and every addressed tool resolves
-  through `chatIDs`/`singleChat`.
+  through `chatIDs`/`singleChat`. `/public/{name}` is the third resolution path, `ByPublic`, and it
+  sees only chats carrying an alias.
 - **the server is dumb.** Tools return raw messages, never summaries — intelligence lives in the
   model. Result shaping is limited to snippets, timestamps and media indicators.
 - **no persisted getUpdates offset.** Redelivery after a crash *is* the crash-safety mechanism;
@@ -181,6 +185,29 @@ These are decisions, not accidents — changing one needs a reason.
   `Content-Type` is sniffed rather than extension-derived — accepted, because `attachment` plus
   `nosniff` means the bytes are saved either way and the type the harness reads is
   `fileResult.MimeType`, still derived from `msg.FileName`.
+- **`/public/{name}` is opt-in by alias, not by flag.** A chat's `public:` field both enables the
+  endpoint and names it, and `servePublic` resolves only through `ByPublic`, so a chat without one
+  is unreachable by construction rather than by a check someone could forget. Aliases are one url
+  namespace — unique across the whole map, not per customer — kept apart from slugs and labels so
+  the website never learns an internal name. Failures are opaque: an unknown alias is
+  `http.NotFound`, the same 404 as an unmatched path, so the endpoint never hints that private
+  chats exist. The endpoint never touches SQLite: `servePublic` reads `Store.Latest`, a cache the
+  store owns so no write path can bypass it. `TrackLatest` loads it in `run()` after
+  `drainPending` — replay writes through `upsertTx`, not `UpsertBatch`, so loading earlier would
+  miss the recovered backlog — and before any writer starts. A chat whose newest row will not load
+  (`trackPublic`) is logged and left tracked but empty, never fatal: the row is still there on the
+  next boot, so failing would brick every start over a decorative ticker, and a database-wide
+  failure surfaces on ingest's first write anyway. `UpsertBatch` updates it only after
+  `tx.Commit` succeeds. Newest is the highest `message_id` both at load and live, never `History`'s
+  `sent, id` order, which disagrees when a bot reply is stored before a same-second customer
+  message and would make a restart change the answer; an edit of the cached message keeps its
+  `Sent`, as `upsertSQL` does. A row changed out-of-band stays stale until restart. The `t.me`
+  link is built from the configured `username`, never `t.me/c/<id>`, so a private group gets no
+  link rather than a leaked id. `file_name` is withheld when `telegram.SynthesizedFileName` says so:
+  `telegram.Message.Media` names every nameless attachment `<file_unique_id><ext>`, the key of the
+  private `/files/` cache, and the predicate sits next to that rule so the two cannot drift.
+  Deletions are accepted (the Bot API never delivers them); filtering new senders was rejected as a
+  moderation policy in a server that is meant to be dumb. Response shape and headers are README's.
 - **`get_history` pages backwards on an opaque cursor**, `sent` plus the surrogate row id, not on
   `to` alone: telegram stamps whole seconds, so a page boundary inside one second would return the
   same rows forever. The token carries no chat id.

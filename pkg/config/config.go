@@ -1,5 +1,6 @@
 // Package config loads the chat map: the allowlist of telegram chats tg-mcp is allowed to
-// log and reply to, keyed by chat id and resolved to a customer slug.
+// log and reply to, keyed by chat id and resolved to a customer slug, and optionally to the
+// public alias a chat's newest message is served under without authentication.
 package config
 
 import (
@@ -7,16 +8,24 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"slices"
 	"sort"
 
 	"gopkg.in/yaml.v3"
 )
 
+var (
+	publicRe   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+	usernameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{3,31}$`)
+)
+
 // ChatInfo describes a single allowlisted chat.
 type ChatInfo struct {
 	Customer string `yaml:"customer"`
 	Label    string `yaml:"label"`
+	Public   string `yaml:"public"`
+	Username string `yaml:"username"`
 }
 
 // Chat is a ChatInfo together with its chat id.
@@ -61,13 +70,16 @@ func Load(path string) (*Config, error) {
 
 // validate rejects empty customer slugs and labels repeated within one customer, and requires a
 // label on every chat of a customer owning more than one: no label value selects an unlabeled
-// chat, so it would be ingested yet unreachable by any addressed tool.
+// chat, so it would be ingested yet unreachable by any addressed tool. Public aliases are one url
+// namespace, so they are unique across the whole map, not per customer; a username only feeds the
+// public link, so one without an alias is rejected as a dead setting.
 func (c *Config) validate() error {
 	count := map[string]int{}
 	for _, info := range c.chats {
 		count[info.Customer]++
 	}
 
+	aliases := map[string]int64{}
 	seen := map[string]map[string]int64{}
 	for _, id := range c.ids() {
 		info := c.chats[id]
@@ -87,6 +99,24 @@ func (c *Config) validate() error {
 			return fmt.Errorf("customer %q: label %q used by both chat %d and %d", info.Customer, info.Label, other, id)
 		}
 		labels[info.Label] = id
+
+		if info.Public != "" {
+			if !publicRe.MatchString(info.Public) {
+				return fmt.Errorf("chat %d: public alias %q must match %s", id, info.Public, publicRe)
+			}
+			if other, dup := aliases[info.Public]; dup {
+				return fmt.Errorf("public alias %q used by both chat %d and %d", info.Public, other, id)
+			}
+			aliases[info.Public] = id
+		}
+		if info.Username != "" {
+			if !usernameRe.MatchString(info.Username) {
+				return fmt.Errorf("chat %d: username %q must match %s", id, info.Username, usernameRe)
+			}
+			if info.Public == "" {
+				return fmt.Errorf("chat %d: username %q set without a public alias", id, info.Username)
+			}
+		}
 	}
 	return nil
 }
@@ -95,6 +125,19 @@ func (c *Config) validate() error {
 func (c *Config) ByChat(chatID int64) (info ChatInfo, ok bool) {
 	info, ok = c.chats[chatID]
 	return info, ok
+}
+
+// ByPublic returns the chat exposed under a public alias; an empty name never matches.
+func (c *Config) ByPublic(name string) (Chat, bool) {
+	if name == "" {
+		return Chat{}, false
+	}
+	for id, info := range c.chats {
+		if info.Public == name {
+			return Chat{ID: id, ChatInfo: info}, true
+		}
+	}
+	return Chat{}, false
 }
 
 // ByCustomer returns every chat belonging to a customer, ordered by label.
